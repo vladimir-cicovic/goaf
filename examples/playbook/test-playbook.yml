@@ -1,0 +1,25 @@
+# Testni playbook — faza 3
+- name: Osnovni test na Debianu
+  hosts: debian
+  vars:
+    pkg: curl
+    dir: /tmp/goaf-playbook-test
+    version: "1.0"
+  tasks:
+    - name: Provjeri hostname
+      command: hostname
+
+    - name: Instaliraj paket
+      install: "{{.pkg}}"
+
+    - name: Kreiraj testni direktorij
+      file:
+        path: "{{.dir}}"
+        state: directory
+        mode: "0755"
+
+    - name: Kreiraj testni fajl
+      file:
+        path: "{{.dir}}/marker.txt"
+        state: file
+        mode: "0644"

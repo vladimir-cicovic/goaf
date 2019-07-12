@@ -1,0 +1,12 @@
+groups:
+  web:
+    hosts:
+      - 10.0.0.10
+      - 10.0.0.11
+  db:
+    hosts:
+      - 10.0.0.20
+
+vars:
+  user: root
+  port: 22

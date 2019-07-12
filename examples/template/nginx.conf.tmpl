@@ -1,0 +1,11 @@
+events {}
+
+http {
+    server {
+        listen {{.port}};
+
+        location / {
+            return 200 "goaf nginx on port {{.port}}\n";
+        }
+    }
+}

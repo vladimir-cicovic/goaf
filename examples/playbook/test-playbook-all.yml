@@ -1,0 +1,22 @@
+# Testni playbook — sve mašine, become, varijable
+- name: Provjeri sistem — sve mašine
+  hosts: all
+  become: true
+  vars:
+    marker_dir: /tmp/goaf-pb-test
+    marker_file: /tmp/goaf-pb-test/ok.txt
+  tasks:
+    - name: Provjeri uptime
+      command: uptime
+
+    - name: Kreiraj marker direktorij
+      file:
+        path: "{{.marker_dir}}"
+        state: directory
+        mode: "0755"
+
+    - name: Kreiraj marker fajl
+      file:
+        path: "{{.marker_file}}"
+        state: file
+        mode: "0644"

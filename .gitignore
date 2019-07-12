@@ -1,0 +1,13 @@
+# Kompajlirani Go binariji
+goaf/goaf
+goaf/goaf-tui
+goaf-tui/goaf-tui
+*.exe
+
+# Editor swap fajlovi
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store

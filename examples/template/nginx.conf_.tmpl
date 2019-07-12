@@ -1,0 +1,25 @@
+user www-data;
+worker_processes {{.workers}};
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    sendfile on;
+    keepalive_timeout {{.keepalive}};
+
+    server {
+        listen {{.port}};
+        server_name {{.vhost}};
+        root {{.docroot}};
+
+        access_log /var/log/nginx/{{.vhost}}-access.log;
+        error_log  /var/log/nginx/{{.vhost}}-error.log;
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+}
