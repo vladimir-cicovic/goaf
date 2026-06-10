@@ -440,7 +440,7 @@ Check:
   go run . -t host template src=t.tmpl dest=/f.conf k=v    # OK (same content)
   go run . -t host template src=t.tmpl dest=/f.conf k=v2   # CHANGED (new value)
 ```
-## SETUP - fact gathering
+### SETUP - fact gathering
 
 
 Collects system information from the host.
@@ -483,7 +483,7 @@ Output example:
 ```
 Facts are used for "when" in playbook
 
-## Output status
+### Output status
 
 ```
 Output status:
@@ -493,7 +493,7 @@ ERROR        - something failed
 WOULD CHANGE - (in -check mode) a change would be made
 ```
 
-## DRY-RUN mod -check
+### DRY-RUN mod -check
 
 Show what would change without any change on the host.
 Works with all modules in both ad-hoc and playbook mode.
