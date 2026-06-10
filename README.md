@@ -23,6 +23,10 @@ goafis cli tool that use one binary with paralel execution with inventory (it co
 
 Goaf-tui is terminal ui for goaf.
 
+## TODO
+-  Add sudo password usage
+-  More checks
+
 
 # Quick install && run
 
