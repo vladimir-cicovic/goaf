@@ -26,6 +26,7 @@ Goaf-tui is terminal ui for goaf.
 ## TODO
 -  Add sudo password usage
 -  More checks
+-  split shell and command where command is safe for execution 
 
 
 # Quick install && run
@@ -516,3 +517,6 @@ Flag could be placed anywhere:
   go run . -t host install nginx -check    # works
   go run . -check -t host install nginx    # works
   ```
+  
+  ## Playbook
+  
