@@ -263,13 +263,11 @@ Examples:
   goaf -i inv.yml -t all copy src=./app.conf dest=/etc/app.conf
 
   goaf -i inv.yml -t web copy src=./nginx.conf dest=/etc/nginx/nginx.conf
-  
   goaf -i inv.yml -t all copy src=~/.ssh/id_ed25519.pub dest=/root/.ssh/authorized_keys
-
   goaf -i inv.yml -t web copy src=./deploy.sh dest=/usr/local/bin/deploy.sh
-
   goaf -i inv.yml -t web copy src=./server.crt dest=/etc/ssl/certs/server.crt
 ```
+
 Check:
 ```bash
   goaf -t host command "cat /etc/app.conf"
