@@ -492,3 +492,23 @@ CHANGED      - a change was made
 ERROR        - something failed
 WOULD CHANGE - (in -check mode) a change would be made
 ```
+
+## DRY-RUN mod -check
+
+Show what would change without any change on the host.
+Works with all modules in both ad-hoc and playbook mode.
+```bash
+  go run . -check -t host install nginx
+  go run . -check -i inv.yml -t all install curl
+  go run . -check -i inv.yml run site.yml
+```
+
+Check mod output:
+```bash
+  [127.0.0.1:1222] WOULD CHANGE
+```
+Flag could be placed anywhere:
+```bash
+  go run . -t host install nginx -check    # works
+  go run . -check -t host install nginx    # works
+  ```
