@@ -19,7 +19,7 @@ But Ansible done excelent aproach and save million years to sys admin / devops /
 Thank you for that ! 
 
 ## Summary
-goafis cli tool that use one binary with paralel execution with inventory (it contains groups with servers/hosts), template (for different group of servers/hosts ex dev, qa or prod), playbook ( set of command chain need it to execute at hosts side)
+goaf is cli tool that use one binary with paralel execution with inventory (it contains groups with servers/hosts), template (for different group of servers/hosts ex dev, qa or prod), playbook ( set of command chain need it to execute at hosts side)
 
 Goaf-tui is terminal ui for goaf.
 
