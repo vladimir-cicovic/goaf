@@ -192,10 +192,45 @@ func main() {
 	}
 }
 
+// knownCLIParams lists the parameter names each module accepts on the CLI.
+// An argument is treated as key=value only when the key is a valid identifier
+// AND a known parameter of the invoked module (template accepts any key as a
+// template variable). Anything else — e.g. shell code like "grep FOO=bar" —
+// is positional, so "=" inside commands no longer breaks parsing.
+var knownCLIParams = map[string]map[string]bool{
+	"command": {"cmd": true},
+	"package": {"name": true},
+	"install": {"name": true},
+	"remove":  {"name": true},
+	"copy":    {"src": true, "dest": true},
+	"file":    {"path": true, "state": true, "mode": true, "owner": true, "group": true},
+	"service": {"name": true, "state": true, "enabled": true},
+}
+
+// isKVArg reports whether s is a key=value pair valid for the given action.
+func isKVArg(action, s string) bool {
+	idx := strings.Index(s, "=")
+	if idx <= 0 {
+		return false
+	}
+	key := s[:idx]
+	for i, r := range key {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	if action == "template" {
+		return true // any key=value is a template variable
+	}
+	allowed, ok := knownCLIParams[action]
+	return ok && allowed[key]
+}
+
 // parseCLIParams parses arguments as key=value pairs, with positional fallback
 // for command and install/remove modules.
 // Args starting with "-" are silently skipped (misplaced flags).
-// KV args (containing "=") are always parsed even if non-KV args are present.
+// KV args are always parsed even if non-KV args are present.
 func parseCLIParams(args []string) map[string]string {
 	action := args[0]
 	rest := args[1:]
@@ -207,7 +242,7 @@ func parseCLIParams(args []string) map[string]string {
 		if strings.HasPrefix(a, "-") {
 			continue // misplaced flag — already handled by pre-scan
 		}
-		if strings.Contains(a, "=") {
+		if isKVArg(action, a) {
 			kvArgs = append(kvArgs, a)
 		} else {
 			posArgs = append(posArgs, a)
