@@ -136,11 +136,19 @@ func connectViaJump(h Host, baseCfg *ssh.ClientConfig, label string) (*Session, 
 	return &Session{Host: label, client: ssh.NewClient(ncc, chans, reqs), jumpClient: jumpClient}, nil
 }
 
+// shQuote quotes a string for POSIX sh with single quotes.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Run executes a command and returns combined stdout+stderr.
-// When s.Become is true, commands are prefixed with sudo unless they already start with sudo.
+// When s.Become is true, the whole command runs privileged via sudo,
+// so compound commands (a && b) are fully covered, not just the first segment.
+// -n fails fast instead of hanging on a password prompt: password sudo is not
+// supported, NOPASSWD is required (see README).
 func (s *Session) Run(cmd string) (string, error) {
-	if s.Become && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo ") {
-		cmd = "sudo " + cmd
+	if s.Become {
+		cmd = "sudo -n sh -c " + shQuote(cmd)
 	}
 	sess, err := s.client.NewSession()
 	if err != nil {
