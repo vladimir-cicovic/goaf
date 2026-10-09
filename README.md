@@ -125,8 +125,16 @@ groups:
 -p <n>         max parallel connections (default: 10)
 -check         dry-run - show what would change, skip Apply
 -become        run commands with sudo
+-ask-become-pass  prompt for the sudo password (or GOAF_BECOME_PASSWORD)
+-diff          show unified diffs for copy/template/file/lineinfile changes
 -json          emit NDJSON event stream on stdout
 -report <path> write run report (.json or .html)
+--tags=a,b     run only tasks with these tags (playbook mode)
+--skip-tags=a  skip tasks with these tags (playbook mode)
+--limit=<expr> restrict playbook run to matching hosts
+--serial=<n>   max hosts per batch - rolling update (playbook mode)
+--vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)
+--ask-vault-pass          prompt for the vault password
 ```
 
 ```bash
@@ -459,6 +467,74 @@ Check:
   go run . -t host template src=t.tmpl dest=/f.conf k=v    # OK (same content)
   go run . -t host template src=t.tmpl dest=/f.conf k=v2   # CHANGED (new value)
 ```
+### User module - local accounts
+
+Creates or removes users (uses sudo internally, like package modules).
+
+Syntax:
+```bash
+  goaf -t <host> user name=<user> [state=present|absent] [shell=/bin/bash] [groups=docker,www-data]
+```
+Examples:
+```bash
+  goaf -t host user name=deploy shell=/bin/bash   # CHANGED (created)
+  goaf -t host user name=deploy shell=/bin/bash   # OK (exists)
+  goaf -t host user name=olduser state=absent
+```
+
+### Lineinfile module - one line in a text file
+
+Ensures a line exists (appended or replacing a regexp match) or is absent.
+
+Syntax:
+```bash
+  goaf -t <host> lineinfile path=<file> line=<line> [regexp=<go-regexp>] [state=present|absent]
+```
+Examples:
+```bash
+  goaf -t host lineinfile path=/etc/motd line="managed by goaf"
+  goaf -t host lineinfile path=/etc/sysctl.conf line="vm.swappiness=10" regexp="^vm.swappiness"
+  goaf -t host lineinfile path=/etc/motd line="old text" state=absent
+```
+
+### Authorized_key module - SSH public keys
+
+Adds or removes one public key in a user's `~/.ssh/authorized_keys`
+(uses sudo internally; use `-become` for idempotent checks on other users' files).
+
+Syntax:
+```bash
+  goaf -t <host> authorized_key user=<user> key="<pubkey>" [state=present|absent]
+```
+Example:
+```bash
+  goaf -t host authorized_key user=deploy key="ssh-ed25519 AAAA... deploy"
+```
+
+### Reboot module - reboot and wait
+
+Reboots the host and waits until SSH is back with a new kernel boot id
+(proves the reboot really happened).
+
+Syntax:
+```bash
+  goaf -t <host> reboot [timeout=300] [msg=<text>]
+```
+Example:
+```bash
+  goaf -t host reboot timeout=300
+```
+Notice: does not work inside docker containers (no init) - the container stops.
+
+### Upgrade module - upgrade all packages
+
+Upgrades everything with the detected package manager (always runs, like command).
+
+Syntax:
+```bash
+  goaf -t <host> upgrade
+```
+
 ### SETUP - fact gathering
 
 
@@ -666,8 +742,127 @@ PLAY RECAP ******************************************************
   - gather_facts defaults to true; set gather_facts: false to skip it
   - play-level become: true runs every task with sudo
   - become runs the whole command via sudo (compound commands with &&
-    are fully privileged); password sudo is not supported, NOPASSWD required
-  - facts expand in when only; using {{.goaf_*}} in task params fails
-    with "map has no entry for key"
+    are fully privileged); without --ask-become-pass, NOPASSWD sudo is required
+  - handlers run only on hosts that notified them (never in check mode)
+  - variables merge order per host: group vars < host vars < play vars <
+    facts < loop item < registered vars
+```
+
+## Inventory - groups, hosts and variables
+
+```yaml
+groups:
+  web:
+    hosts: [10.0.0.10, 10.0.0.11]
+    vars:
+      http_port: "80"
+  db:
+    hosts: [10.0.0.20]
+  all:
+    children: [web, db]
+hosts:
+  10.0.0.10:
+    user: deploy        # per-host connection overrides (user/port/key)
+    vars:
+      http_port: "8080" # wins over group vars
+vars:
+  user: root
+  port: 22
+  key: ~/.ssh/id_rsa
+```
+
+## Advanced playbook - register, conditions, tags, limit, serial
+
+### register - reuse task output
+
+Saves task output into a per-host variable for later tasks (`when` and params).
+
+```yaml
+    - name: Capture os name
+      command: "grep PRETTY_NAME= /etc/os-release"
+      register: osline
+    - name: Show it on debian
+      command: "echo got-{{.osline}}"
+      when: '{{eq .goaf_os_family "debian"}}'
+```
+
+### failed_when / changed_when / ignore_errors
+
+```yaml
+    - name: Check disk, fail over 90%
+      command: "df -h / | awk 'NR==2{print $5}'"
+      failed_when: '{{eq .result "91%"}}'
+    - name: Read-only probe
+      command: "cat /etc/motd"
+      changed_when: "false"        # always report OK
+    - name: Best effort
+      command: "/opt/flaky.sh"
+      ignore_errors: true          # continue play, counts as ok
+```
+`failed_when`/`changed_when` see play vars, facts, registered vars plus
+`result` (task output) and `changed` (true/false).
+
+### tags - run a subset of tasks
+
+```yaml
+    - name: Restart app
+      service: {name: app, state: restarted}
+      tags: [deploy]
+```
+```bash
+  goaf -i inv.yml --tags=deploy run site.yml
+  goaf -i inv.yml --skip-tags=deploy run site.yml
+```
+Tasks tagged `always` run even with `--tags` (unless skipped).
+
+### limit / serial - subset and rolling update
+
+```bash
+  goaf -i inv.yml --limit=web run site.yml     # only web hosts
+  goaf -i inv.yml --serial=2 run site.yml      # two hosts at a time
+```
+
+## Diff and backup
+
+Show what would change and keep timestamped backups of replaced files.
+
+```bash
+  goaf -diff -t host copy src=./app.conf dest=/etc/app.conf
+  goaf -t host copy src=./app.conf dest=/etc/app.conf backup=true
+  goaf -t host template src=./app.conf.tmpl dest=/etc/app.conf port=80 backup=true
+  goaf -check -diff -i inv.yml run site.yml   # diffs in dry-run too
+```
+Backups land next to the file as `<dest>.goafbak-<timestamp>`.
+
+## Vault - encrypted values
+
+Encrypt secrets, reference them as `$GOAFVAULT` values in playbook vars.
+
+```bash
+  goaf vault encrypt --vault-pass-file=.vaultpw "s3cr3t"
+  # paste the $GOAFVAULT;... block into vars:
+```
+```yaml
+  vars:
+    db_password: |
+      $GOAFVAULT;1.1;AES256
+      afSWfweuLIHUe1o2Z8Us...
+```
+```bash
+  goaf --vault-pass-file=.vaultpw -i inv.yml run site.yml
+  goaf --ask-vault-pass -i inv.yml run site.yml   # prompt
+  # GOAF_VAULT_PASSWORD env also works
+  goaf vault decrypt --vault-pass-file=.vaultpw '$GOAFVAULT;...'
+```
+
+## Validate - check without connecting
+
+Parses the playbook and inventory, resolves hosts, checks modules,
+templates, conditions and handler references. No SSH connections.
+
+```bash
+  goaf -i inv.yml validate site.yml
+  # PLAY [Deploy web]: OK (3 hosts, 5 tasks)
+  # VALID
 ```
   
