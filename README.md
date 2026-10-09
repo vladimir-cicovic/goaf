@@ -23,6 +23,20 @@ goaf is cli tool that use one binary with paralel execution with inventory (it c
 
 Goaf-tui is terminal ui for goaf.
 
+## Screenshots
+
+Ad-hoc command on a group:
+
+![goaf ad-hoc uptime](screenshoots/single-uptime.png)
+
+Condition check:
+
+![goaf condition check](screenshoots/cli-condition-check.jpeg)
+
+goaf-tui running a playbook:
+
+![goaf-tui playbook](screenshoots/goaf-tui-playbook.png)
+
 ## TODO
 -  Add sudo password usage
 -  More checks
