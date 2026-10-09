@@ -86,11 +86,12 @@ func detectInitSystem(s *Session) string {
 		return "systemd"
 	}
 	// OpenRC (Alpine etc.)
-	if out, _ := s.Run("which rc-service 2>/dev/null"); strings.TrimSpace(out) != "" {
+	// command -v is a POSIX shell builtin, always available (unlike which).
+	if out, _ := s.Run("command -v rc-service 2>/dev/null"); strings.TrimSpace(out) != "" {
 		return "openrc"
 	}
 	// SysV fallback
-	if out, _ := s.Run("which service 2>/dev/null"); strings.TrimSpace(out) != "" {
+	if out, _ := s.Run("command -v service 2>/dev/null"); strings.TrimSpace(out) != "" {
 		return "sysv"
 	}
 	return ""

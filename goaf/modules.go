@@ -9,7 +9,7 @@ import (
 type Result struct {
 	Host    string
 	Changed bool
-	DryRun  bool   // true = would change (check mode), not applied
+	DryRun  bool // true = would change (check mode), not applied
 	Output  string
 	Err     error
 }
@@ -70,7 +70,7 @@ func (m PackageModule) Name() string { return "package" }
 func (m PackageModule) Check(s *Session) (bool, error) {
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
-		return false, fmt.Errorf("no known package manager found (apt/dnf/yum)")
+		return false, fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
 	}
 	installed, err := isInstalled(s, mgr, m.Pkg)
 	if err != nil {
@@ -108,7 +108,8 @@ func (m PackageModule) Apply(s *Session) (string, error) {
 
 func detectPkgMgr(s *Session) string {
 	for _, mgr := range []string{"apt-get", "dnf", "yum", "apk", "slackpkg", "emerge", "pacman", "zypper"} {
-		if out, _ := s.Run("which " + mgr + " 2>/dev/null"); strings.TrimSpace(out) != "" {
+		// command -v is a POSIX shell builtin, always available (unlike which).
+		if out, _ := s.Run("command -v " + mgr + " 2>/dev/null"); strings.TrimSpace(out) != "" {
 			if mgr == "apt-get" {
 				return "apt"
 			}
