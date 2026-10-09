@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -165,7 +166,9 @@ func (s *Session) Upload(localPath, remotePath string) error {
 	}
 	defer src.Close()
 
-	if err := client.MkdirAll(filepath.Dir(remotePath)); err != nil {
+	// Remote paths always use forward slashes: path (not filepath),
+	// otherwise filepath.Dir on Windows produces backslash paths.
+	if err := client.MkdirAll(path.Dir(remotePath)); err != nil {
 		return fmt.Errorf("creating remote directory: %w", err)
 	}
 
@@ -189,7 +192,9 @@ func (s *Session) UploadContent(content []byte, remotePath string) error {
 	}
 	defer client.Close()
 
-	if err := client.MkdirAll(filepath.Dir(remotePath)); err != nil {
+	// Remote paths always use forward slashes: path (not filepath),
+	// otherwise filepath.Dir on Windows produces backslash paths.
+	if err := client.MkdirAll(path.Dir(remotePath)); err != nil {
 		return fmt.Errorf("creating remote directory: %w", err)
 	}
 
