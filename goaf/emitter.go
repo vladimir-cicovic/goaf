@@ -103,7 +103,7 @@ func (e *TextEmitter) HostRecap(host string, ok, changed, failed, skipped int) {
 func (e *TextEmitter) RunFinished(_ int, _ int, _ int) {}
 
 func (e *TextEmitter) Diagnostic(msg string) {
-	fmt.Println(msg)
+	fmt.Fprintln(os.Stderr, msg)
 }
 
 // ### JSONEmitter ###
@@ -111,13 +111,16 @@ func (e *TextEmitter) Diagnostic(msg string) {
 // Diagnostic messages go to stderr and never mix with the event stream.
 
 type JSONEmitter struct {
-	enc *json.Encoder
+	enc    *json.Encoder
+	errEnc *json.Encoder
 }
 
 func newJSONEmitter() *JSONEmitter {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
-	return &JSONEmitter{enc: enc}
+	errEnc := json.NewEncoder(os.Stderr)
+	errEnc.SetEscapeHTML(false)
+	return &JSONEmitter{enc: enc, errEnc: errEnc}
 }
 
 func (e *JSONEmitter) emit(v any) {
@@ -211,5 +214,5 @@ func (e *JSONEmitter) RunFinished(ok, changed, failed int) {
 }
 
 func (e *JSONEmitter) Diagnostic(msg string) {
-	e.emit(map[string]any{"type": "diagnostic", "msg": msg})
+	_ = e.errEnc.Encode(map[string]any{"type": "diagnostic", "msg": msg})
 }
