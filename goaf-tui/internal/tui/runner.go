@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ### Message types ###
@@ -55,13 +55,20 @@ func startRun(goafBin string, args []string) (*exec.Cmd, <-chan eventMsg, error)
 		return nil, nil, err
 	}
 
+	// Record the raw NDJSON stream for the run history (never breaks a run).
+	histFile, histID := runHistoryFile(runMode(args))
+	var outReader io.Reader = stdout
+	if histFile != nil {
+		outReader = io.TeeReader(stdout, histFile)
+	}
+
 	ch := make(chan eventMsg, 128)
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pipeNDJSON(stdout, ch)
+		pipeNDJSON(outReader, ch)
 	}()
 
 	wg.Add(1)
@@ -73,6 +80,10 @@ func startRun(goafBin string, args []string) (*exec.Cmd, <-chan eventMsg, error)
 	go func() {
 		wg.Wait()
 		_ = cmd.Wait()
+		if histFile != nil {
+			_ = histFile.Close()
+		}
+		finalizeHistoryRun(histID)
 		close(ch)
 	}()
 
@@ -153,6 +164,8 @@ func formatEvent(ev eventMsg) []string {
 		out := str("output")
 		reason := str("reason")
 		errStr := str("error")
+		ignored := b("ignored")
+		diff := str("diff")
 
 		// Split multi-line output: first line goes on the status line,
 		// remaining lines are emitted indented below it.
@@ -172,10 +185,19 @@ func formatEvent(ev eventMsg) []string {
 		if reason != "" {
 			line += " (" + reason + ")"
 		}
+		if ignored {
+			line += " (ignored)"
+		}
 		if errStr != "" {
 			line += " ✗ " + errStr
 		}
-		return append([]string{line}, extra...)
+		lines := append([]string{line}, extra...)
+		if diff != "" {
+			for _, l := range strings.Split(diff, "\n") {
+				lines = append(lines, "        "+l)
+			}
+		}
+		return lines
 
 	case "handlers_running":
 		return []string{"  RUNNING HANDLERS"}
