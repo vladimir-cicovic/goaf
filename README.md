@@ -519,4 +519,142 @@ Flag could be placed anywhere:
   ```
   
   ## Playbook
+
+Run an ordered set of tasks (plays) against inventory groups.
+Syntax:
+```bash
+  goaf -i <inventory> run <playbook.yml>
+  goaf -p 20 -i inv.yml run site.yml              # max parallel connections (default 10)
+  goaf -check -i inv.yml run site.yml             # dry-run, nothing is applied
+  goaf -json -i inv.yml run site.yml              # NDJSON event stream (used by goaf-tui)
+  goaf -report run.json -i inv.yml run site.yml   # write run report (.json or .html)
+```
+
+### Play structure
+
+```yaml
+- name: Deploy web
+  hosts: web            # group, host, host:port or comma-separated list
+  become: true          # run tasks with sudo (default false)
+  gather_facts: false   # skip fact gathering (default true)
+  vars:
+    pkg: nginx
+    port: "80"
+  tasks:
+    - name: Install nginx
+      install: "{{.pkg}}"       # shorthand string works for command/install/remove
+    - name: Deploy config
+      template:
+        src: ./nginx.conf.tmpl
+        dest: /etc/nginx/nginx.conf
+        port: "{{.port}}"
+      notify: Restart nginx
+    - name: Ensure docroot
+      file:
+        path: /var/www/html
+        state: directory
+        mode: "0755"
+  handlers:
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+```
+
+### Task keys
+
+```bash
+  name     - task display name
+  <module> - one of: command, package, install, remove, copy, file,
+             service, template, setup (as map, or shorthand string
+             for command/install/remove)
+  when     - Go template over play vars + gathered facts; the task is
+             skipped when it renders to empty/false/0/no
+  loop     - list of items (or with_items:); each iteration exposes {{.item}}
+  notify   - handler name, triggered when this task reports CHANGED
+```
+
+`{{.var}}` in params expands from play vars (plus `{{.item}}` in loops).
+Facts (`goaf_os`, `goaf_os_family`, ...) expand in `when` only.
+
+### when - conditional tasks
+
+```yaml
+    - name: Debian-only task
+      command: "echo debian"
+      when: '{{eq .goaf_os_family "debian"}}'
+```
+Output (verified on docker):
+```
+TASK [Debian-only task] ****************************************
+skipping: [192.168.152.10:2223] (when condition false)
+skipping: [192.168.152.10:2224] (when condition false)
+changed: [192.168.152.10:2222] => debian-marker-prod
+```
+
+### loop - iterate a task
+
+```yaml
+    - name: Create marker files
+      file:
+        path: "/tmp/marker-{{.item}}.txt"
+        state: file
+      loop: [a, b]
+```
+Output (verified on docker):
+```
+TASK [Create loop files [item=a]] ******************************
+changed: [192.168.152.10:2222] => file: /tmp/loop-a.txt
+TASK [Create loop files [item=b]] ******************************
+changed: [192.168.152.10:2222] => file: /tmp/loop-b.txt
+```
+
+### handlers + notify
+
+Handlers run once at the end of the play, only for names notified by
+a task that reported CHANGED.
+```yaml
+  tasks:
+    - name: Deploy marker
+      copy:
+        src: ./app.conf
+        dest: /etc/app.conf
+      notify: Reload app
+  handlers:
+    - name: Reload app
+      command: "systemctl reload app"
+```
+Output (verified on docker):
+```
+TASK [Deploy marker] *******************************************
+changed: [192.168.152.10:2222] => copied → /tmp/pb-marker.txt
+RUNNING HANDLERS ************************************************
+HANDLER [Marker deployed] ***************************************
+changed: [192.168.152.10:2222]
+```
+Second run: copy reports OK, the handler does not run.
+
+### Multiple plays
+
+A playbook is a list of plays. Each host is processed only in the
+first play that targets it; later plays skip it.
+```
+PLAY [Second play hits processed hosts] *************************
+skipping: [192.168.152.10:2222] (already processed in a previous play)
+(no fresh hosts — play has nothing to do)
+PLAY RECAP ******************************************************
+192.168.152.10:2222            : ok=4    changed=4    failed=0    skipped=1
+```
+
+### Notes (verified on docker: debian / openSUSE / alpine)
+
+```bash
+  - gather_facts defaults to true; set gather_facts: false to skip it
+  - play-level become: true runs every task with sudo
+  - become prefixes sudo to the start of the command only, so module
+    internals joined with && run partly unprivileged (e.g. file inside
+    a root-owned directory fails under become)
+  - facts expand in when only; using {{.goaf_*}} in task params fails
+    with "map has no entry for key"
+```
   
