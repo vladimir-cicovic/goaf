@@ -12,6 +12,14 @@ type Result struct {
 	DryRun  bool // true = would change (check mode), not applied
 	Output  string
 	Err     error
+	Ignored bool   // true = failure was ignored via ignore_errors (counts as ok)
+	Diff    string // unified diff old vs new, only when diffMode is on
+}
+
+// Differ is implemented by modules that can show what would change:
+// a unified diff of current remote state vs desired state.
+type Differ interface {
+	Diff(s *Session) (string, error)
 }
 
 // Module defines the contract for all operations.
@@ -25,6 +33,8 @@ type Module interface {
 
 // RunModule executes a module: checks state, applies only if needed.
 // In checkMode, Apply is skipped and the result is marked as DryRun.
+// When diffMode is on and the module implements Differ, the result carries
+// a unified diff of old vs new content (computed before Apply).
 func RunModule(host string, s *Session, mod Module, checkMode bool) Result {
 	needed, err := mod.Check(s)
 	if err != nil {
@@ -33,15 +43,23 @@ func RunModule(host string, s *Session, mod Module, checkMode bool) Result {
 	if !needed {
 		return Result{Host: host, Changed: false}
 	}
+	diff := ""
+	if diffMode {
+		if d, ok := mod.(Differ); ok {
+			if dd, derr := d.Diff(s); derr == nil {
+				diff = dd
+			}
+		}
+	}
 	if checkMode {
-		return Result{Host: host, Changed: true, DryRun: true, Output: "(would change)"}
+		return Result{Host: host, Changed: true, DryRun: true, Output: "(would change)", Diff: diff}
 	}
 	out, err := mod.Apply(s)
 	out = strings.TrimSpace(out)
 	if err != nil {
 		return Result{Host: host, Output: out, Err: err}
 	}
-	return Result{Host: host, Changed: true, Output: out}
+	return Result{Host: host, Changed: true, Output: out, Diff: diff}
 }
 
 // ---------- command module ----------

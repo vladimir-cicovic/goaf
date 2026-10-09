@@ -14,9 +14,10 @@ import (
 // to the target host via SFTP.
 // Idempotency: compares SHA256 of rendered content with the remote file.
 type TemplateModule struct {
-	Src  string            // local template path
-	Dest string            // remote path on target host
-	Vars map[string]string // variables available in the template as {{.key}}
+	Src    string            // local template path
+	Dest   string            // remote path on target host
+	Vars   map[string]string // variables available in the template as {{.key}}
+	Backup bool              // save existing remote file to dest.goafbak-<timestamp> before replacing
 }
 
 func (m TemplateModule) Name() string { return "template" }
@@ -37,10 +38,28 @@ func (m TemplateModule) Apply(s *Session) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	msg := ""
+	if m.Backup {
+		if bk, berr := backupRemote(s, m.Dest); berr != nil {
+			return "", berr
+		} else if bk != "" {
+			msg = "backup: " + bk + "\n"
+		}
+	}
 	if err := s.UploadContent(rendered, m.Dest); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("template deployed → %s", m.Dest), nil
+	return msg + fmt.Sprintf("template deployed → %s", m.Dest), nil
+}
+
+// Diff shows the unified diff of current remote content vs rendered template.
+func (m TemplateModule) Diff(s *Session) (string, error) {
+	rendered, err := m.render()
+	if err != nil {
+		return "", err
+	}
+	old, _ := s.ReadRemote(m.Dest) // missing file → treated as empty
+	return unifiedDiff(m.Dest, m.Dest, string(old), string(rendered), 3), nil
 }
 
 func (m TemplateModule) render() ([]byte, error) {
