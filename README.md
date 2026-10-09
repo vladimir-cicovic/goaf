@@ -665,9 +665,8 @@ PLAY RECAP ******************************************************
 ```bash
   - gather_facts defaults to true; set gather_facts: false to skip it
   - play-level become: true runs every task with sudo
-  - become prefixes sudo to the start of the command only, so module
-    internals joined with && run partly unprivileged (e.g. file inside
-    a root-owned directory fails under become)
+  - become runs the whole command via sudo (compound commands with &&
+    are fully privileged); password sudo is not supported, NOPASSWD required
   - facts expand in when only; using {{.goaf_*}} in task params fails
     with "map has no entry for key"
 ```
