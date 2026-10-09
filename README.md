@@ -646,7 +646,7 @@ PLAY RECAP ******************************************************
 192.168.152.10:2222            : ok=4    changed=4    failed=0    skipped=1
 ```
 
-### Notes (verified on docker: debian / openSUSE / alpine)
+### Notes
 
 ```bash
   - gather_facts defaults to true; set gather_facts: false to skip it
