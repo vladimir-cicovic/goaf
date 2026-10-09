@@ -99,13 +99,14 @@ func detectInitSystem(s *Session) string {
 
 func serviceIsActive(s *Session, init, name string) (bool, error) {
 	var cmd string
+	q := shQuote(name)
 	switch init {
 	case "systemd":
-		cmd = "systemctl is-active " + name + " 2>/dev/null"
+		cmd = "systemctl is-active " + q + " 2>/dev/null"
 	case "openrc":
-		cmd = "rc-service " + name + " status 2>/dev/null | grep -q 'started' && echo active || echo inactive"
+		cmd = "rc-service " + q + " status 2>/dev/null | grep -q 'started' && echo active || echo inactive"
 	case "sysv":
-		cmd = "service " + name + " status >/dev/null 2>&1 && echo active || echo inactive"
+		cmd = "service " + q + " status >/dev/null 2>&1 && echo active || echo inactive"
 	default:
 		return false, fmt.Errorf("no init system detected")
 	}
@@ -114,7 +115,7 @@ func serviceIsActive(s *Session, init, name string) (bool, error) {
 }
 
 func serviceIsEnabled(s *Session, name string) (bool, error) {
-	out, _ := s.Run("systemctl is-enabled " + name + " 2>/dev/null")
+	out, _ := s.Run("systemctl is-enabled " + shQuote(name) + " 2>/dev/null")
 	return strings.TrimSpace(out) == "enabled", nil
 }
 
@@ -127,29 +128,31 @@ func serviceStateCmd(init, name, state string) (string, error) {
 	if action == "" {
 		return "", fmt.Errorf("unknown service state: %s", state)
 	}
+	q := shQuote(name)
 	switch init {
 	case "systemd":
-		return "systemctl " + action + " " + name, nil
+		return "systemctl " + action + " " + q, nil
 	case "openrc":
-		return "rc-service " + name + " " + action, nil
+		return "rc-service " + q + " " + action, nil
 	case "sysv":
-		return "service " + name + " " + action, nil
+		return "service " + q + " " + action, nil
 	}
 	return "", fmt.Errorf("unknown init system: %s", init)
 }
 
 func serviceEnabledCmd(init, name string, enable bool) string {
+	q := shQuote(name)
 	switch init {
 	case "systemd":
 		if enable {
-			return "systemctl enable " + name
+			return "systemctl enable " + q
 		}
-		return "systemctl disable " + name
+		return "systemctl disable " + q
 	case "openrc":
 		if enable {
-			return "rc-update add " + name
+			return "rc-update add " + q
 		}
-		return "rc-update del " + name
+		return "rc-update del " + q
 	}
 	return "" // sysv has no standard enable/disable command
 }

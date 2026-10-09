@@ -23,7 +23,7 @@ func (m CopyModule) Check(s *Session) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("reading local file '%s': %w", m.Src, err)
 	}
-	out, _ := s.Run("sha256sum " + m.Dest + " 2>/dev/null | awk '{print $1}'")
+	out, _ := s.Run("sha256sum " + shQuote(m.Dest) + " 2>/dev/null | awk '{print $1}'")
 	remoteHash := strings.TrimSpace(out)
 	return localHash != remoteHash, nil
 }

@@ -27,7 +27,7 @@ func (m TemplateModule) Check(s *Session) (bool, error) {
 		return false, err
 	}
 	localHash := bytesSHA256(rendered)
-	out, _ := s.Run("sha256sum " + m.Dest + " 2>/dev/null | awk '{print $1}'")
+	out, _ := s.Run("sha256sum " + shQuote(m.Dest) + " 2>/dev/null | awk '{print $1}'")
 	remoteHash := strings.TrimSpace(out)
 	return localHash != remoteHash, nil
 }
