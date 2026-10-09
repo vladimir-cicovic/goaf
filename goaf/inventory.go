@@ -4,21 +4,71 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Group describes a named group — direct hosts, child groups, or both.
-type Group struct {
-	Hosts    []string `yaml:"hosts"`
-	Children []string `yaml:"children"`
+// varsForHost merges group vars (sorted group order, later groups win) and
+// per-host vars (win over groups) for a resolved host.
+func (inv *Inventory) varsForHost(h Host) map[string]string {
+	vars := map[string]string{}
+	if len(inv.Groups) == 0 && len(inv.Hosts) == 0 {
+		return vars
+	}
+	names := make([]string, 0, len(inv.Groups))
+	for n := range inv.Groups {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	label := h.Addr
+	if h.Port != 0 && h.Port != 22 {
+		label = h.Addr + ":" + strconv.Itoa(h.Port)
+	}
+	for _, n := range names {
+		raws, err := inv.collectGroup(n, map[string]bool{}, map[string]bool{})
+		if err != nil {
+			continue
+		}
+		for _, raw := range raws {
+			if raw == label || raw == h.Addr {
+				for k, v := range inv.Groups[n].Vars {
+					vars[k] = v
+				}
+				break
+			}
+		}
+	}
+	if e, ok := inv.hostEntry(label, h.Addr); ok {
+		for k, v := range e.Vars {
+			vars[k] = v
+		}
+	}
+	return vars
 }
 
-// Inventory describes server groups and global variables.
+// Group describes a named group — direct hosts, child groups, or both.
+// Vars apply to every host in the group (play vars override them).
+type Group struct {
+	Hosts    []string          `yaml:"hosts"`
+	Children []string          `yaml:"children"`
+	Vars     map[string]string `yaml:"vars"`
+}
+
+// HostEntry holds per-host variables and optional connection overrides.
+type HostEntry struct {
+	Vars map[string]string `yaml:"vars"`
+	User string            `yaml:"user"`
+	Port int               `yaml:"port"`
+	Key  string            `yaml:"key"`
+}
+
+// Inventory describes server groups, per-host entries and global variables.
 type Inventory struct {
-	Groups map[string]Group `yaml:"groups"`
+	Groups map[string]Group     `yaml:"groups"`
+	Hosts  map[string]HostEntry `yaml:"hosts"`
 	Vars   struct {
 		User     string `yaml:"user"`
 		Port     int    `yaml:"port"`
@@ -132,6 +182,18 @@ func (inv *Inventory) collectGroup(name string, visiting, seen map[string]bool) 
 	return rawHosts, nil
 }
 
+// hostEntry returns the per-host entry for a raw host string ("addr" or
+// "addr:port"), matching the full string first, then the bare address.
+func (inv *Inventory) hostEntry(raw, addr string) (HostEntry, bool) {
+	if e, ok := inv.Hosts[raw]; ok {
+		return e, true
+	}
+	if e, ok := inv.Hosts[addr]; ok {
+		return e, true
+	}
+	return HostEntry{}, false
+}
+
 func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 	hosts := make([]Host, 0, len(rawHosts))
 	for _, raw := range rawHosts {
@@ -145,6 +207,17 @@ func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 			h.Port = port
 		} else {
 			h.Addr = raw
+		}
+		if e, ok := inv.hostEntry(raw, h.Addr); ok {
+			if e.User != "" {
+				h.User = e.User
+			}
+			if e.Port != 0 {
+				h.Port = e.Port
+			}
+			if e.Key != "" {
+				h.Key = e.Key
+			}
 		}
 		if inv.Vars.JumpHost != "" {
 			h.JumpAddr = inv.Vars.JumpHost
