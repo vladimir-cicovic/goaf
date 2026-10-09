@@ -61,6 +61,8 @@ func (e *TextEmitter) TaskSkipped(host, reason string) {
 
 func (e *TextEmitter) TaskResult(r Result) {
 	switch {
+	case r.Err != nil && r.Ignored:
+		fmt.Printf("ok: [%s] (ignored failure: %v)\n", r.Host, r.Err)
 	case r.Err != nil:
 		fmt.Printf("FAILED: [%s]\n  MSG: %v\n", r.Host, r.Err)
 	case r.Changed && r.DryRun:
@@ -74,6 +76,20 @@ func (e *TextEmitter) TaskResult(r Result) {
 	default:
 		fmt.Printf("ok: [%s]\n", r.Host)
 	}
+	if r.Diff != "" {
+		fmt.Printf("    ---\n%s\n", indentDiff(r.Diff))
+	}
+}
+
+func indentDiff(s string) string {
+	out := ""
+	for i, line := range splitLines(s) {
+		if i > 0 {
+			out += "\n    "
+		}
+		out += line
+	}
+	return out
 }
 
 func (e *TextEmitter) HandlersRunning() {
@@ -165,6 +181,10 @@ func (e *JSONEmitter) TaskSkipped(host, reason string) {
 func (e *JSONEmitter) TaskResult(r Result) {
 	ev := map[string]any{"type": "task_result", "host": r.Host}
 	switch {
+	case r.Err != nil && r.Ignored:
+		ev["status"] = "ok"
+		ev["ignored"] = true
+		ev["ignored_error"] = r.Err.Error()
 	case r.Err != nil:
 		ev["status"] = "failed"
 		ev["error"] = r.Err.Error()
@@ -177,6 +197,9 @@ func (e *JSONEmitter) TaskResult(r Result) {
 	default:
 		ev["status"] = "ok"
 		ev["output"] = r.Output
+	}
+	if r.Diff != "" {
+		ev["diff"] = r.Diff
 	}
 	e.emit(ev)
 }

@@ -3,25 +3,83 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
+// splitFlag parses "-name", "--name" and "--name=value" (also single dash).
+func splitFlag(a string) (name, val string, hasVal bool) {
+	t := strings.TrimLeft(a, "-")
+	if t == "" || a == t {
+		return "", "", false // not a flag at all
+	}
+	if i := strings.Index(t, "="); i >= 0 {
+		return t[:i], t[i+1:], true
+	}
+	return t, "", false
+}
+
+func splitComma(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func main() {
-	// Pre-scan os.Args for -check/--check and -json/--json before flag.Parse()
-	// so these flags work even when placed after positional arguments.
+	// Pre-scan os.Args for flags before flag.Parse() so they work even
+	// when placed after positional arguments.
 	checkMode := false
 	jsonMode := false
 	becomeMode := false
+	diffFlag := false
+	askBecomePass := false
+	var tags, skipTags []string
+	limitStr := ""
+	serialStr := ""
+	vaultPassFileFlag := ""
+	askVaultPass := false
 	filtered := os.Args[:1]
 	for _, a := range os.Args[1:] {
-		switch a {
-		case "-check", "--check":
+		name, val, hasVal := splitFlag(a)
+		switch name {
+		case "check":
 			checkMode = true
-		case "-json", "--json":
+		case "json":
 			jsonMode = true
-		case "-become", "--become":
+		case "become":
 			becomeMode = true
+		case "diff":
+			diffFlag = true
+		case "ask-become-pass":
+			askBecomePass = true
+		case "ask-vault-pass":
+			askVaultPass = true
+		case "tags":
+			if hasVal {
+				tags = append(tags, splitComma(val)...)
+			}
+		case "skip-tags":
+			if hasVal {
+				skipTags = append(skipTags, splitComma(val)...)
+			}
+		case "limit":
+			if hasVal {
+				limitStr = val
+			}
+		case "serial":
+			if hasVal {
+				serialStr = val
+			}
+		case "vault-pass-file":
+			if hasVal {
+				vaultPassFileFlag = val
+			}
 		default:
 			filtered = append(filtered, a)
 		}
@@ -31,12 +89,26 @@ func main() {
 	if jsonMode {
 		activeEmitter = newJSONEmitter()
 	}
+	diffMode = diffFlag
+	vaultPassFile = vaultPassFileFlag
+	vaultAskPass = askVaultPass
 
 	invPath := flag.String("i", "inventory.yml", "path to inventory file")
 	target := flag.String("t", "", "target group or host (e.g. web or 10.0.0.1:2222)")
 	parallel := flag.Int("p", 10, "max number of parallel connections")
 	reportPath := flag.String("report", "", "write run report to this path (.json or .html)")
 	flag.Parse()
+
+	if askBecomePass && os.Getenv("GOAF_BECOME_PASSWORD") == "" {
+		pw, err := readPassword("BECOME password: ")
+		if err != nil || pw == "" {
+			fmt.Fprintln(os.Stderr, "no become password given")
+			os.Exit(1)
+		}
+		becomePassword = pw
+	} else if pw := os.Getenv("GOAF_BECOME_PASSWORD"); pw != "" {
+		becomePassword = pw
+	}
 
 	// Was -i passed explicitly? If not, a missing default inventory is fine
 	// (direct host:port targets don't need one).
@@ -51,6 +123,24 @@ func main() {
 	if len(args) < 1 {
 		usage()
 		os.Exit(1)
+	}
+
+	// vault helper: goaf vault encrypt|decrypt [value|-] (stdin when omitted)
+	if args[0] == "vault" {
+		runVault(args[1:], vaultPassFileFlag, askVaultPass)
+		return
+	}
+
+	// validate: parse playbook + inventory without connecting anywhere
+	if args[0] == "validate" {
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: goaf -i inventory.yml validate <playbook.yml>")
+			os.Exit(1)
+		}
+		if code := runValidate(args[1], *invPath); code != 0 {
+			os.Exit(code)
+		}
+		return
 	}
 
 	inv, err := LoadInventory(*invPath)
@@ -76,8 +166,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error loading playbook: %v\n", err)
 			os.Exit(1)
 		}
+		opts := RunOptions{
+			Parallelism: *parallel,
+			CheckMode:   checkMode,
+			Tags:        tags,
+			SkipTags:    skipTags,
+			Limit:       limitStr,
+			Serial:      parseSerial(serialStr),
+		}
 		activeEmitter.RunStarted("playbook", 0, *parallel, checkMode)
-		failed, report := RunPlaybook(plays, inv, *parallel, checkMode)
+		failed, report := RunPlaybookOpts(plays, inv, opts)
 		if *reportPath != "" {
 			if err := writeReport(report, *reportPath); err != nil {
 				fmt.Fprintf(os.Stderr, "report error: %v\n", err)
@@ -153,6 +251,9 @@ func main() {
 			if r.Err != nil {
 				fmt.Printf("    %v\n", r.Err)
 			}
+			if r.Diff != "" {
+				fmt.Printf("    ---\n%s\n", indentDiff(r.Diff))
+			}
 		}
 	}
 
@@ -198,13 +299,17 @@ func main() {
 // template variable). Anything else — e.g. shell code like "grep FOO=bar" —
 // is positional, so "=" inside commands no longer breaks parsing.
 var knownCLIParams = map[string]map[string]bool{
-	"command": {"cmd": true},
-	"package": {"name": true},
-	"install": {"name": true},
-	"remove":  {"name": true},
-	"copy":    {"src": true, "dest": true},
-	"file":    {"path": true, "state": true, "mode": true, "owner": true, "group": true},
-	"service": {"name": true, "state": true, "enabled": true},
+	"command":        {"cmd": true},
+	"package":        {"name": true},
+	"install":        {"name": true},
+	"remove":         {"name": true},
+	"copy":           {"src": true, "dest": true, "backup": true},
+	"file":           {"path": true, "state": true, "mode": true, "owner": true, "group": true},
+	"service":        {"name": true, "state": true, "enabled": true},
+	"user":           {"name": true, "state": true, "shell": true, "groups": true},
+	"lineinfile":     {"path": true, "line": true, "regexp": true, "state": true},
+	"authorized_key": {"user": true, "key": true, "state": true},
+	"reboot":         {"timeout": true, "msg": true},
 }
 
 // isKVArg reports whether s is a key=value pair valid for the given action.
@@ -296,32 +401,181 @@ func splitLines(s string) []string {
 	return lines
 }
 
+// parseSerial parses --serial=N (hosts per batch).
+func parseSerial(s string) int {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "invalid --serial value %q (want a non-negative integer)\n", s)
+		os.Exit(1)
+	}
+	return n
+}
+
+// runVault implements `goaf vault encrypt|decrypt [value]`.
+// Without a value the data is read from stdin.
+func runVault(args []string, passFile string, askPass bool) {
+	if len(args) < 1 || (args[0] != "encrypt" && args[0] != "decrypt") {
+		fmt.Fprintln(os.Stderr, "usage: goaf vault encrypt|decrypt [value|-]\n  password via --vault-pass-file, --ask-vault-pass or GOAF_VAULT_PASSWORD")
+		os.Exit(1)
+	}
+	pw, err := vaultPassword(passFile, askPass)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vault: %v\n", err)
+		os.Exit(1)
+	}
+	var input string
+	if len(args) >= 2 && args[1] != "-" {
+		input = args[1]
+	} else {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vault: reading stdin: %v\n", err)
+			os.Exit(1)
+		}
+		input = strings.TrimRight(string(data), "\n")
+	}
+	if args[0] == "encrypt" {
+		out, err := encryptVault(input, pw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vault: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+		return
+	}
+	out, err := decryptVault(strings.TrimSpace(input), pw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vault: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(out)
+}
+
+// runValidate parses a playbook and inventory without connecting anywhere.
+// Returns process exit code (0 = valid).
+func runValidate(playPath, invPath string) int {
+	plays, err := loadPlaybook(playPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "playbook %q: %v\n", playPath, err)
+		return 2
+	}
+	inv, err := LoadInventory(invPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "inventory %q: %v\n", invPath, err)
+		return 2
+	}
+	failed := 0
+	for _, play := range plays {
+		hosts, err := inv.Resolve(play.Hosts)
+		if err != nil {
+			fmt.Printf("PLAY [%s]: ERROR resolving hosts %q: %v\n", play.Name, play.Hosts, err)
+			failed++
+			continue
+		}
+		handlers := map[string]bool{}
+		for _, h := range play.Handlers {
+			handlers[h.Name] = true
+		}
+		// Dummy context for validation: loop items, gathered facts and
+		// registered names only exist at runtime — provide placeholders so
+		// only genuinely broken templates fail validation.
+		dummyVars := map[string]string{"item": "ITEM"}
+		for _, f := range []string{"goaf_hostname", "goaf_arch", "goaf_kernel", "goaf_ip", "goaf_os", "goaf_os_name", "goaf_os_version", "goaf_os_family"} {
+			dummyVars[f] = "FACT"
+		}
+		for _, t := range play.Tasks {
+			if t.Register != "" {
+				dummyVars[t.Register] = "REGISTERED"
+			}
+		}
+		checkVars := mergeVars(play.Vars, dummyVars)
+		playFailed := 0
+		for _, t := range play.Tasks {
+			factory, ok := LookupModule(t.Module)
+			if !ok {
+				fmt.Printf("PLAY [%s] task %q: unknown module %q\n", play.Name, t.Name, t.Module)
+				playFailed++
+				continue
+			}
+			if _, err := expandVars(t.Params, checkVars); err != nil {
+				fmt.Printf("PLAY [%s] task %q: %v\n", play.Name, t.Name, err)
+				playFailed++
+				continue
+			}
+			for _, expr := range []string{t.When, t.FailedWhen, t.ChangedWhen} {
+				if expr != "" {
+					if _, err := evalWhen(expr, checkVars); err != nil {
+						fmt.Printf("PLAY [%s] task %q: bad condition: %v\n", play.Name, t.Name, err)
+						playFailed++
+						break
+					}
+				}
+			}
+			_ = factory
+			if t.Notify != "" && !handlers[t.Notify] {
+				fmt.Printf("PLAY [%s] task %q: notify target %q has no handler\n", play.Name, t.Name, t.Notify)
+				playFailed++
+			}
+		}
+		if playFailed == 0 {
+			fmt.Printf("PLAY [%s]: OK (%d hosts, %d tasks)\n", play.Name, len(hosts), len(play.Tasks))
+		} else {
+			failed += playFailed
+		}
+	}
+	if failed > 0 {
+		fmt.Printf("INVALID: %d problem(s)\n", failed)
+		return 2
+	}
+	fmt.Println("VALID")
+	return 0
+}
+
 func usage() {
 	fmt.Println("Usage:")
-	fmt.Println("  goaf [-check] [-json] -i inventory.yml -t <group|host> <module> [params]")
-	fmt.Println("  goaf [-check] [-json] -i inventory.yml run <playbook.yml>")
+	fmt.Println("  goaf [-check] [-json] [-diff] -i inventory.yml -t <group|host> <module> [params]")
+	fmt.Println("  goaf [-check] [-json] [-diff] -i inventory.yml run <playbook.yml>")
+	fmt.Println("  goaf -i inventory.yml validate <playbook.yml>")
+	fmt.Println("  goaf vault encrypt|decrypt [value|-]")
 	fmt.Println("\nFlags:")
 	fmt.Println("  -i <path>       inventory file (default: inventory.yml)")
 	fmt.Println("  -t <target>     group name or host:port for ad-hoc")
 	fmt.Println("  -p <n>          parallelism (default: 10)")
 	fmt.Println("  -check          dry-run — show what would change, skip Apply()")
 	fmt.Println("  -become         run tasks with sudo (privilege escalation)")
+	fmt.Println("  -ask-become-pass  prompt for the sudo password (or GOAF_BECOME_PASSWORD)")
+	fmt.Println("  -diff           show unified diffs for copy/template/file/lineinfile changes")
 	fmt.Println("  -json           emit NDJSON event stream (one JSON object per line)")
 	fmt.Println("  -report <path>  write run report (.json or .html)")
+	fmt.Println("  --tags=a,b      run only tasks with these tags (playbook mode)")
+	fmt.Println("  --skip-tags=a   skip tasks with these tags (playbook mode)")
+	fmt.Println("  --limit=<expr>  restrict playbook run to matching hosts")
+	fmt.Println("  --serial=<n>    max hosts per batch — rolling update (playbook mode)")
+	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
+	fmt.Println("  --ask-vault-pass          prompt for the vault password")
 	fmt.Println("\nModules (ad-hoc):")
 	fmt.Println("  command  \"<shell command>\"")
 	fmt.Println("  install  <package>")
 	fmt.Println("  remove   <package>")
-	fmt.Println("  copy     src=<local> dest=<remote>")
+	fmt.Println("  upgrade  (upgrade all packages)")
+	fmt.Println("  copy     src=<local> dest=<remote> [backup=true]")
 	fmt.Println("  file     path=<path> [state=file|directory|absent] [mode=0644] [owner=root] [group=root]")
+	fmt.Println("  lineinfile path=<path> line=<line> [regexp=<re>] [state=present|absent]")
 	fmt.Println("  service  name=<service> [state=started|stopped|restarted] [enabled=true|false]")
-	fmt.Println("  template src=<template> dest=<remote> [key=value ...]")
+	fmt.Println("  template src=<template> dest=<remote> [backup=true] [key=value ...]")
+	fmt.Println("  user     name=<user> [state=present|absent] [shell=<sh>] [groups=a,b]")
+	fmt.Println("  authorized_key user=<user> key=\"<pubkey>\" [state=present|absent]")
+	fmt.Println("  reboot   [timeout=300] (reboot and wait for SSH)")
 	fmt.Println("  setup    (display gathered host facts: os, hostname, arch, kernel, ip)")
 	fmt.Println("\nPlaybook (run):")
 	fmt.Println("  goaf -i inventory.yml run site.yml")
 	fmt.Println("  goaf -check -i inventory.yml run site.yml   # dry-run")
 	fmt.Println("  goaf -json  -i inventory.yml run site.yml   # NDJSON output")
-	fmt.Println("\nPlaybook task keys: when, loop/with_items, notify (+ top-level handlers:)")
+	fmt.Println("\nPlaybook task keys: when, failed_when, changed_when, ignore_errors,")
+	fmt.Println("  register, loop/with_items, notify, tags (+ top-level handlers:)")
 	fmt.Println("\nExamples:")
 	fmt.Println("  goaf -t web command \"uptime\"")
 	fmt.Println("  goaf -t web install nginx")
