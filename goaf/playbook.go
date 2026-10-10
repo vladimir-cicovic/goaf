@@ -21,17 +21,23 @@ type Play struct {
 }
 
 type PlayTask struct {
-	Name   string
-	Module string
-	Params map[string]string
-	When   string   // Go template expression; skip task if evaluates to false/0/no/empty
-	Loop   []string // iterate task over each item, available as {{.item}}
-	Notify string   // handler name to trigger if this task changed something
+	Name        string
+	Module      string
+	Params      map[string]string
+	When        string   // Go template expression; skip task if evaluates to false/0/no/empty
+	Loop        []string // iterate task over each item, available as {{.item}}
+	Notify      string   // handler name to trigger if this task changed something
+	Register    string   // save task output into a per-host variable for later tasks
+	FailedWhen  string   // Go template over vars+facts+result; mark failed when true
+	ChangedWhen string   // Go template over vars+facts+result; override changed when set
+	IgnoreErrs  bool     // continue the play when this task fails
+	Tags        []string // task tags for --tags/--skip-tags filtering
 }
 
 var knownModuleNames = []string{
 	"command", "package", "install", "remove",
 	"copy", "file", "service", "template", "setup",
+	"user", "lineinfile", "authorized_key", "reboot", "upgrade",
 }
 
 func loadPlaybook(path string) ([]Play, error) {
@@ -39,7 +45,10 @@ func loadPlaybook(path string) ([]Play, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadPlaybookBytes(data)
+}
 
+func loadPlaybookBytes(data []byte) ([]Play, error) {
 	var rawPlays []struct {
 		Name        string                   `yaml:"name"`
 		Hosts       string                   `yaml:"hosts"`
@@ -68,11 +77,39 @@ func loadPlaybook(path string) ([]Play, error) {
 		if rp.GatherFacts != nil {
 			gatherFacts = *rp.GatherFacts
 		}
+		// Decrypt $GOAFVAULT play vars up front so {{.var}} references
+		// expand to plaintext. Without a password the envelope is kept
+		// and fails later with a clear error when actually used.
+		vars := rp.Vars
+		hasVault := false
+		for _, v := range vars {
+			if strings.HasPrefix(v, vaultHeader) {
+				hasVault = true
+				break
+			}
+		}
+		if hasVault {
+			if pw, err := vaultPassword(vaultPassFile, vaultAskPass); err == nil {
+				decrypted := make(map[string]string, len(vars))
+				for k, v := range vars {
+					if strings.HasPrefix(v, vaultHeader) {
+						dv, derr := decryptVault(v, pw)
+						if derr != nil {
+							return nil, fmt.Errorf("play %q var %q: %w", rp.Name, k, derr)
+						}
+						decrypted[k] = dv
+					} else {
+						decrypted[k] = v
+					}
+				}
+				vars = decrypted
+			}
+		}
 		plays = append(plays, Play{
 			Name:        rp.Name,
 			Hosts:       rp.Hosts,
 			Become:      rp.Become,
-			Vars:        rp.Vars,
+			Vars:        vars,
 			Tasks:       tasks,
 			Handlers:    handlers,
 			GatherFacts: gatherFacts,
@@ -96,11 +133,34 @@ func parseTasks(rawTasks []map[string]interface{}) ([]PlayTask, error) {
 func parseOneTask(raw map[string]interface{}) (PlayTask, error) {
 	name, _ := raw["name"].(string)
 	notify, _ := raw["notify"].(string)
+	register, _ := raw["register"].(string)
 
-	// when may be a bool literal (true/false) or a string template expression
-	var when string
-	if w, ok := raw["when"]; ok {
-		when = fmt.Sprintf("%v", w)
+	// when / failed_when / changed_when may be bool literals or string templates
+	strVal := func(key string) string {
+		if w, ok := raw[key]; ok {
+			return fmt.Sprintf("%v", w)
+		}
+		return ""
+	}
+	when := strVal("when")
+	failedWhen := strVal("failed_when")
+	changedWhen := strVal("changed_when")
+
+	ignoreErrs := false
+	if v, ok := raw["ignore_errors"]; ok {
+		ignoreErrs = fmt.Sprintf("%v", v) == "true"
+	}
+
+	// tags — single string or list
+	var tags []string
+	if v, ok := raw["tags"]; ok {
+		if list, ok := v.([]interface{}); ok {
+			for _, item := range list {
+				tags = append(tags, fmt.Sprintf("%v", item))
+			}
+		} else {
+			tags = append(tags, fmt.Sprintf("%v", v))
+		}
 	}
 
 	// loop / with_items — list of items to iterate over
@@ -128,12 +188,17 @@ func parseOneTask(raw map[string]interface{}) (PlayTask, error) {
 			return PlayTask{}, fmt.Errorf("task %q: %w", name, err)
 		}
 		return PlayTask{
-			Name:   name,
-			Module: modName,
-			Params: params,
-			When:   when,
-			Loop:   loop,
-			Notify: notify,
+			Name:        name,
+			Module:      modName,
+			Params:      params,
+			When:        when,
+			Loop:        loop,
+			Notify:      notify,
+			Register:    register,
+			FailedWhen:  failedWhen,
+			ChangedWhen: changedWhen,
+			IgnoreErrs:  ignoreErrs,
+			Tags:        tags,
 		}, nil
 	}
 	return PlayTask{}, fmt.Errorf("task %q: no known module key found (expected one of: %s)",
@@ -199,7 +264,14 @@ func taskParams(modName string, val interface{}) (map[string]string, error) {
 	return nil, fmt.Errorf("unexpected param type %T for module %q", val, modName)
 }
 
+// vaultPassFile / vaultAskPass configure vault decryption for $GOAFVAULT
+// values in playbook vars (set from CLI flags).
+var vaultPassFile string
+var vaultAskPass bool
+
 // expandVars renders Go template expressions in each param value using vars.
+// $GOAFVAULT values are decrypted first (password via --vault-pass-file,
+// --ask-vault-pass or GOAF_VAULT_PASSWORD).
 func expandVars(params map[string]string, vars map[string]string) (map[string]string, error) {
 	if len(vars) == 0 {
 		return params, nil
@@ -210,6 +282,14 @@ func expandVars(params map[string]string, vars map[string]string) (map[string]st
 	}
 	result := make(map[string]string, len(params))
 	for k, v := range params {
+		if strings.HasPrefix(v, vaultHeader) {
+			dv, err := decryptVaultValue(v, vaultPassFile, vaultAskPass)
+			if err != nil {
+				return nil, fmt.Errorf("param %q: %w", k, err)
+			}
+			result[k] = dv
+			continue
+		}
 		if !strings.Contains(v, "{{") {
 			result[k] = v
 			continue

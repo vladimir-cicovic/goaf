@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,9 +19,13 @@ import (
 // Session represents a single SSH connection to one host.
 type Session struct {
 	Host       string // "addr" or "addr:port" for display
-	Become     bool   // prefix commands with sudo when true
+	Become     bool   // run commands with sudo when true
 	client     *ssh.Client
 	jumpClient *ssh.Client // non-nil when tunnelled through a jump host
+	addr       string      // connection parameters, kept for waitForSSH
+	port       int
+	user       string
+	keyPath    string
 }
 
 // authMethods collects available authentication methods.
@@ -105,7 +110,7 @@ func Connect(h Host) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Host: label, client: client}, nil
+	return &Session{Host: label, client: client, addr: h.Addr, port: h.Port, user: h.User, keyPath: h.Key}, nil
 }
 
 func connectViaJump(h Host, baseCfg *ssh.ClientConfig, label string) (*Session, error) {
@@ -135,19 +140,44 @@ func connectViaJump(h Host, baseCfg *ssh.ClientConfig, label string) (*Session, 
 	return &Session{Host: label, client: ssh.NewClient(ncc, chans, reqs), jumpClient: jumpClient}, nil
 }
 
+// shQuote quotes a string for POSIX sh with single quotes.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// becomePassword, when non-empty, is used for sudo authentication
+// (--ask-become-pass or GOAF_BECOME_PASSWORD). The password is piped to
+// `sudo -S` on every command, so no timestamp caching across connections
+// is needed; embedded hardcoded `sudo` calls (package modules) run as root
+// and need no further authentication.
+var becomePassword string
+
 // Run executes a command and returns combined stdout+stderr.
-// When s.Become is true, commands are prefixed with sudo unless they already start with sudo.
+// When s.Become is true, the whole command runs privileged via sudo,
+// so compound commands (a && b) are fully covered, not just the first segment.
+// Without a become password, -n fails fast instead of hanging on a prompt:
+// NOPASSWD sudo is required in that case (see README).
 func (s *Session) Run(cmd string) (string, error) {
-	if s.Become && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo ") {
-		cmd = "sudo " + cmd
-	}
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer sess.Close()
 
+	if s.Become {
+		if becomePassword != "" {
+			sess.Stdin = strings.NewReader(becomePassword + "\n")
+			cmd = "sudo -S -p '' sh -c " + shQuote(cmd)
+		} else {
+			cmd = "sudo -n sh -c " + shQuote(cmd)
+		}
+	}
+
 	out, err := sess.CombinedOutput(cmd)
+	if err != nil && becomePassword != "" && s.Become &&
+		strings.Contains(string(out), "Sorry, try again") {
+		return string(out), fmt.Errorf("sudo authentication failed (wrong become password?)")
+	}
 	return string(out), err
 }
 
@@ -165,7 +195,9 @@ func (s *Session) Upload(localPath, remotePath string) error {
 	}
 	defer src.Close()
 
-	if err := client.MkdirAll(filepath.Dir(remotePath)); err != nil {
+	// Remote paths always use forward slashes: path (not filepath),
+	// otherwise filepath.Dir on Windows produces backslash paths.
+	if err := client.MkdirAll(path.Dir(remotePath)); err != nil {
 		return fmt.Errorf("creating remote directory: %w", err)
 	}
 
@@ -189,7 +221,9 @@ func (s *Session) UploadContent(content []byte, remotePath string) error {
 	}
 	defer client.Close()
 
-	if err := client.MkdirAll(filepath.Dir(remotePath)); err != nil {
+	// Remote paths always use forward slashes: path (not filepath),
+	// otherwise filepath.Dir on Windows produces backslash paths.
+	if err := client.MkdirAll(path.Dir(remotePath)); err != nil {
 		return fmt.Errorf("creating remote directory: %w", err)
 	}
 
@@ -229,4 +263,32 @@ func (s *Session) Close() {
 	if s.jumpClient != nil {
 		s.jumpClient.Close()
 	}
+}
+
+// waitForSSH polls until SSH on the session's host accepts connections again
+// (used after reboot), or the timeout in seconds expires.
+// Host key verification is skipped: keys may legitimately change after a
+// reinstall, and this is only a reachability probe, not a session.
+func waitForSSH(s *Session, timeoutSec int) error {
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+	}
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	addr := fmt.Sprintf("%s:%d", s.addr, s.port)
+	for time.Now().Before(deadline) {
+		if methods, err := authMethods(s.keyPath); err == nil {
+			cfg := &ssh.ClientConfig{
+				User:            s.user,
+				Auth:            methods,
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         5 * time.Second,
+			}
+			if c, derr := ssh.Dial("tcp", addr, cfg); derr == nil {
+				c.Close()
+				return nil
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("SSH did not return within %ds on %s", timeoutSec, addr)
 }

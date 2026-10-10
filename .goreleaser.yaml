@@ -1,0 +1,39 @@
+# goreleaser cuts release binaries for goaf (CLI) and goaf-tui (TUI).
+# Run: goreleaser release --snapshot --clean (local) or via the release workflow.
+version: 2
+
+project_name: goaf
+
+builds:
+  - id: goaf
+    dir: goaf
+    binary: goaf
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+  - id: goaf-tui
+    dir: goaf-tui
+    main: ./cmd
+    binary: goaf-tui
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - ^docs:
+      - ^test:

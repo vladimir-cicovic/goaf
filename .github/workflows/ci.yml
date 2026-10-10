@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: goaf/go.mod
+          cache-dependency-path: |
+            goaf/go.sum
+            goaf-tui/go.sum
+
+      - name: Vet goaf
+        working-directory: goaf
+        run: go vet ./...
+
+      - name: Test goaf
+        working-directory: goaf
+        run: go test ./...
+
+      - name: Build goaf
+        working-directory: goaf
+        run: go build -o goaf .
+
+      - name: Vet goaf-tui
+        working-directory: goaf-tui
+        run: go vet ./...
+
+      - name: Build goaf-tui
+        working-directory: goaf-tui
+        run: go build -o goaf-tui ./cmd

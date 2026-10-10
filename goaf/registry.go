@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -42,7 +43,7 @@ var moduleRegistry = map[string]ModuleFactory{
 		if !ok {
 			return nil, fmt.Errorf("module 'copy' requires parameter 'dest'")
 		}
-		return CopyModule{Src: src, Dest: dest}, nil
+		return CopyModule{Src: src, Dest: dest, Backup: p["backup"] == "true"}, nil
 	},
 	"file": func(p map[string]string) (Module, error) {
 		path, ok := p["path"]
@@ -95,11 +96,64 @@ var moduleRegistry = map[string]ModuleFactory{
 		}
 		vars := make(map[string]string)
 		for k, v := range p {
-			if k != "src" && k != "dest" {
+			if k != "src" && k != "dest" && k != "backup" {
 				vars[k] = v
 			}
 		}
-		return TemplateModule{Src: src, Dest: dest, Vars: vars}, nil
+		return TemplateModule{Src: src, Dest: dest, Vars: vars, Backup: p["backup"] == "true"}, nil
+	},
+	"user": func(p map[string]string) (Module, error) {
+		name, ok := p["name"]
+		if !ok {
+			return nil, fmt.Errorf("module 'user' requires parameter 'name'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return UserModule{Username: name, State: state, Shell: p["shell"], Groups: p["groups"]}, nil
+	},
+	"lineinfile": func(p map[string]string) (Module, error) {
+		path, ok := p["path"]
+		if !ok {
+			return nil, fmt.Errorf("module 'lineinfile' requires parameter 'path'")
+		}
+		line, ok := p["line"]
+		if !ok {
+			return nil, fmt.Errorf("module 'lineinfile' requires parameter 'line'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return LineinfileModule{Path: path, Line: line, Regexp: p["regexp"], State: state}, nil
+	},
+	"authorized_key": func(p map[string]string) (Module, error) {
+		user, ok := p["user"]
+		if !ok {
+			return nil, fmt.Errorf("module 'authorized_key' requires parameter 'user'")
+		}
+		key, ok := p["key"]
+		if !ok {
+			return nil, fmt.Errorf("module 'authorized_key' requires parameter 'key'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return AuthorizedKeyModule{User: user, Key: key, State: state}, nil
+	},
+	"reboot": func(p map[string]string) (Module, error) {
+		timeout := 300
+		if v, ok := p["timeout"]; ok && v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				timeout = n
+			}
+		}
+		return RebootModule{Timeout: timeout, Msg: p["msg"]}, nil
+	},
+	"upgrade": func(_ map[string]string) (Module, error) {
+		return UpgradeModule{}, nil
 	},
 }
 

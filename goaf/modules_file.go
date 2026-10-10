@@ -20,7 +20,7 @@ func (m FileModule) Name() string { return "file" }
 func (m FileModule) Check(s *Session) (bool, error) {
 	state := m.state()
 
-	out, _ := s.Run("stat -c '%F|%a|%U|%G' " + m.Path + " 2>/dev/null || echo ABSENT")
+	out, _ := s.Run("stat -c '%F|%a|%U|%G' " + shQuote(m.Path) + " 2>/dev/null || echo ABSENT")
 	current := strings.TrimSpace(out)
 
 	if state == "absent" {
@@ -62,39 +62,40 @@ func (m FileModule) Check(s *Session) (bool, error) {
 func (m FileModule) Apply(s *Session) (string, error) {
 	state := m.state()
 
+	q := shQuote(m.Path)
 	if state == "absent" {
-		if _, err := s.Run("rm -rf " + m.Path); err != nil {
+		if _, err := s.Run("rm -rf " + q); err != nil {
 			return "", fmt.Errorf("deleting '%s': %w", m.Path, err)
 		}
 		return "deleted: " + m.Path, nil
 	}
 
 	if state == "directory" {
-		if _, err := s.Run("mkdir -p " + m.Path); err != nil {
+		if _, err := s.Run("mkdir -p " + q); err != nil {
 			return "", fmt.Errorf("creating directory '%s': %w", m.Path, err)
 		}
 	} else {
-		if _, err := s.Run("mkdir -p $(dirname " + m.Path + ") && touch " + m.Path); err != nil {
+		if _, err := s.Run("mkdir -p $(dirname " + q + ") && touch " + q); err != nil {
 			return "", fmt.Errorf("creating file '%s': %w", m.Path, err)
 		}
 	}
 
 	if m.Mode != "" {
-		if _, err := s.Run("chmod " + m.Mode + " " + m.Path); err != nil {
+		if _, err := s.Run("chmod " + shQuote(m.Mode) + " " + q); err != nil {
 			return "", fmt.Errorf("chmod '%s': %w", m.Path, err)
 		}
 	}
 
 	if m.Owner != "" || m.Group != "" {
-		var chown string
+		var spec string
 		if m.Owner != "" && m.Group != "" {
-			chown = m.Owner + ":" + m.Group
+			spec = m.Owner + ":" + m.Group
 		} else if m.Owner != "" {
-			chown = m.Owner
+			spec = m.Owner
 		} else {
-			chown = ":" + m.Group
+			spec = ":" + m.Group
 		}
-		if _, err := s.Run("chown " + chown + " " + m.Path); err != nil {
+		if _, err := s.Run("chown " + shQuote(spec) + " " + q); err != nil {
 			return "", fmt.Errorf("chown '%s': %w", m.Path, err)
 		}
 	}
@@ -107,6 +108,52 @@ func (m FileModule) state() string {
 		return "file"
 	}
 	return m.State
+}
+
+// Diff shows which attributes would change (type/mode/owner/group).
+func (m FileModule) Diff(s *Session) (string, error) {
+	out, _ := s.Run("stat -c '%F|%a|%U|%G' " + shQuote(m.Path) + " 2>/dev/null || echo ABSENT")
+	cur := strings.TrimSpace(out)
+	state := m.state()
+	if cur == "ABSENT" {
+		if state == "absent" {
+			return "", nil
+		}
+		return "+" + state + ": " + m.Path, nil
+	}
+	if state == "absent" {
+		return "-" + cur + ": " + m.Path, nil
+	}
+	parts := strings.SplitN(cur, "|", 4)
+	if len(parts) < 4 {
+		return "", nil
+	}
+	wantType := map[string]string{"file": "regular", "directory": "directory"}[state]
+	var b strings.Builder
+	b.WriteString("--- " + m.Path + "\n+++ " + m.Path + " (desired)\n")
+	changed := false
+	attr := func(name, old, want string) {
+		if want != "" && old != want {
+			b.WriteString("-" + name + "=" + old + "\n+" + name + "=" + want + "\n")
+			changed = true
+		}
+	}
+	if wantType == "regular" {
+		if !strings.HasPrefix(parts[0], "regular") {
+			b.WriteString("-type=" + parts[0] + "\n+type=regular file\n")
+			changed = true
+		}
+	} else if parts[0] != wantType {
+		b.WriteString("-type=" + parts[0] + "\n+type=" + wantType + "\n")
+		changed = true
+	}
+	attr("mode", parts[1], normalizeMode(m.Mode))
+	attr("owner", parts[2], m.Owner)
+	attr("group", parts[3], m.Group)
+	if !changed {
+		return "", nil
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
 
 // normalizeMode strips leading zeros to match stat output (e.g. "0644" → "644").

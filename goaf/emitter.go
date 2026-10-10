@@ -61,6 +61,8 @@ func (e *TextEmitter) TaskSkipped(host, reason string) {
 
 func (e *TextEmitter) TaskResult(r Result) {
 	switch {
+	case r.Err != nil && r.Ignored:
+		fmt.Printf("ok: [%s] (ignored failure: %v)\n", r.Host, r.Err)
 	case r.Err != nil:
 		fmt.Printf("FAILED: [%s]\n  MSG: %v\n", r.Host, r.Err)
 	case r.Changed && r.DryRun:
@@ -74,6 +76,20 @@ func (e *TextEmitter) TaskResult(r Result) {
 	default:
 		fmt.Printf("ok: [%s]\n", r.Host)
 	}
+	if r.Diff != "" {
+		fmt.Printf("    ---\n%s\n", indentDiff(r.Diff))
+	}
+}
+
+func indentDiff(s string) string {
+	out := ""
+	for i, line := range splitLines(s) {
+		if i > 0 {
+			out += "\n    "
+		}
+		out += line
+	}
+	return out
 }
 
 func (e *TextEmitter) HandlersRunning() {
@@ -103,7 +119,7 @@ func (e *TextEmitter) HostRecap(host string, ok, changed, failed, skipped int) {
 func (e *TextEmitter) RunFinished(_ int, _ int, _ int) {}
 
 func (e *TextEmitter) Diagnostic(msg string) {
-	fmt.Println(msg)
+	fmt.Fprintln(os.Stderr, msg)
 }
 
 // ### JSONEmitter ###
@@ -111,13 +127,16 @@ func (e *TextEmitter) Diagnostic(msg string) {
 // Diagnostic messages go to stderr and never mix with the event stream.
 
 type JSONEmitter struct {
-	enc *json.Encoder
+	enc    *json.Encoder
+	errEnc *json.Encoder
 }
 
 func newJSONEmitter() *JSONEmitter {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
-	return &JSONEmitter{enc: enc}
+	errEnc := json.NewEncoder(os.Stderr)
+	errEnc.SetEscapeHTML(false)
+	return &JSONEmitter{enc: enc, errEnc: errEnc}
 }
 
 func (e *JSONEmitter) emit(v any) {
@@ -162,6 +181,10 @@ func (e *JSONEmitter) TaskSkipped(host, reason string) {
 func (e *JSONEmitter) TaskResult(r Result) {
 	ev := map[string]any{"type": "task_result", "host": r.Host}
 	switch {
+	case r.Err != nil && r.Ignored:
+		ev["status"] = "ok"
+		ev["ignored"] = true
+		ev["ignored_error"] = r.Err.Error()
 	case r.Err != nil:
 		ev["status"] = "failed"
 		ev["error"] = r.Err.Error()
@@ -174,6 +197,9 @@ func (e *JSONEmitter) TaskResult(r Result) {
 	default:
 		ev["status"] = "ok"
 		ev["output"] = r.Output
+	}
+	if r.Diff != "" {
+		ev["diff"] = r.Diff
 	}
 	e.emit(ev)
 }
@@ -211,5 +237,5 @@ func (e *JSONEmitter) RunFinished(ok, changed, failed int) {
 }
 
 func (e *JSONEmitter) Diagnostic(msg string) {
-	e.emit(map[string]any{"type": "diagnostic", "msg": msg})
+	_ = e.errEnc.Encode(map[string]any{"type": "diagnostic", "msg": msg})
 }

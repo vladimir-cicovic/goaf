@@ -9,9 +9,17 @@ import (
 type Result struct {
 	Host    string
 	Changed bool
-	DryRun  bool   // true = would change (check mode), not applied
+	DryRun  bool // true = would change (check mode), not applied
 	Output  string
 	Err     error
+	Ignored bool   // true = failure was ignored via ignore_errors (counts as ok)
+	Diff    string // unified diff old vs new, only when diffMode is on
+}
+
+// Differ is implemented by modules that can show what would change:
+// a unified diff of current remote state vs desired state.
+type Differ interface {
+	Diff(s *Session) (string, error)
 }
 
 // Module defines the contract for all operations.
@@ -25,6 +33,8 @@ type Module interface {
 
 // RunModule executes a module: checks state, applies only if needed.
 // In checkMode, Apply is skipped and the result is marked as DryRun.
+// When diffMode is on and the module implements Differ, the result carries
+// a unified diff of old vs new content (computed before Apply).
 func RunModule(host string, s *Session, mod Module, checkMode bool) Result {
 	needed, err := mod.Check(s)
 	if err != nil {
@@ -33,15 +43,23 @@ func RunModule(host string, s *Session, mod Module, checkMode bool) Result {
 	if !needed {
 		return Result{Host: host, Changed: false}
 	}
+	diff := ""
+	if diffMode {
+		if d, ok := mod.(Differ); ok {
+			if dd, derr := d.Diff(s); derr == nil {
+				diff = dd
+			}
+		}
+	}
 	if checkMode {
-		return Result{Host: host, Changed: true, DryRun: true, Output: "(would change)"}
+		return Result{Host: host, Changed: true, DryRun: true, Output: "(would change)", Diff: diff}
 	}
 	out, err := mod.Apply(s)
 	out = strings.TrimSpace(out)
 	if err != nil {
 		return Result{Host: host, Output: out, Err: err}
 	}
-	return Result{Host: host, Changed: true, Output: out}
+	return Result{Host: host, Changed: true, Output: out, Diff: diff}
 }
 
 // ---------- command module ----------
@@ -70,7 +88,7 @@ func (m PackageModule) Name() string { return "package" }
 func (m PackageModule) Check(s *Session) (bool, error) {
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
-		return false, fmt.Errorf("no known package manager found (apt/dnf/yum)")
+		return false, fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
 	}
 	installed, err := isInstalled(s, mgr, m.Pkg)
 	if err != nil {
@@ -85,30 +103,32 @@ func (m PackageModule) Apply(s *Session) (string, error) {
 		return "", fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
 	}
 	var cmd string
+	q := shQuote(m.Pkg)
 	switch mgr {
 	case "apt":
-		cmd = "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y " + m.Pkg
+		cmd = "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y " + q
 	case "dnf":
-		cmd = "sudo dnf install -y " + m.Pkg
+		cmd = "sudo dnf install -y " + q
 	case "yum":
-		cmd = "sudo yum install -y " + m.Pkg
+		cmd = "sudo yum install -y " + q
 	case "apk":
-		cmd = "sudo apk add --no-cache " + m.Pkg
+		cmd = "sudo apk add --no-cache " + q
 	case "slackpkg":
-		cmd = "sudo slackpkg -batch=on -default_answer=y install " + m.Pkg
+		cmd = "sudo slackpkg -batch=on -default_answer=y install " + q
 	case "emerge":
-		cmd = "sudo emerge --quiet --getbinpkg " + m.Pkg
+		cmd = "sudo emerge --quiet --getbinpkg " + q
 	case "pacman":
-		cmd = "sudo pacman -S --noconfirm " + m.Pkg
+		cmd = "sudo pacman -S --noconfirm " + q
 	case "zypper":
-		cmd = "sudo zypper install -y " + m.Pkg
+		cmd = "sudo zypper install -y " + q
 	}
 	return s.Run(cmd)
 }
 
 func detectPkgMgr(s *Session) string {
 	for _, mgr := range []string{"apt-get", "dnf", "yum", "apk", "slackpkg", "emerge", "pacman", "zypper"} {
-		if out, _ := s.Run("which " + mgr + " 2>/dev/null"); strings.TrimSpace(out) != "" {
+		// command -v is a POSIX shell builtin, always available (unlike which).
+		if out, _ := s.Run("command -v " + mgr + " 2>/dev/null"); strings.TrimSpace(out) != "" {
 			if mgr == "apt-get" {
 				return "apt"
 			}
@@ -120,17 +140,18 @@ func detectPkgMgr(s *Session) string {
 
 func isInstalled(s *Session, mgr, pkg string) (bool, error) {
 	var cmd string
+	q := shQuote(pkg)
 	switch mgr {
 	case "apt":
-		cmd = "dpkg -s " + pkg + " >/dev/null 2>&1 && echo yes || echo no"
+		cmd = "dpkg -s " + q + " >/dev/null 2>&1 && echo yes || echo no"
 	case "dnf", "yum":
 		// --whatprovides also catches virtual provides (e.g. wget2-wget provides wget)
-		cmd = "rpm -q --whatprovides " + pkg + " >/dev/null 2>&1 && echo yes || echo no"
+		cmd = "rpm -q --whatprovides " + q + " >/dev/null 2>&1 && echo yes || echo no"
 	case "apk":
-		cmd = "apk info -e " + pkg + " >/dev/null 2>&1 && echo yes || echo no"
+		cmd = "apk info -e " + q + " >/dev/null 2>&1 && echo yes || echo no"
 	case "slackpkg":
 		// /var/log/packages/ contains files in format: pkgname-version-arch-build
-		cmd = "ls /var/log/packages/ | grep -q '^" + pkg + "-' && echo yes || echo no"
+		cmd = "ls /var/log/packages/ | grep -q " + shQuote("^"+pkg+"-") + " && echo yes || echo no"
 	case "emerge":
 		// /var/db/pkg/<category>/<pkgname>-<version>/ — search by package name only
 		// pkg can be "app-text/tree" or just "tree"; take the part after the last "/"
@@ -138,12 +159,12 @@ func isInstalled(s *Session, mgr, pkg string) (bool, error) {
 		if idx := strings.LastIndex(pkg, "/"); idx >= 0 {
 			pkgName = pkg[idx+1:]
 		}
-		cmd = "find /var/db/pkg -maxdepth 2 -name '" + pkgName + "-[0-9]*' -type d | head -1 | grep -q . && echo yes || echo no"
+		cmd = "find /var/db/pkg -maxdepth 2 -name " + shQuote(pkgName+"-[0-9]*") + " -type d | head -1 | grep -q . && echo yes || echo no"
 	case "pacman":
-		cmd = "pacman -Qi " + pkg + " >/dev/null 2>&1 && echo yes || echo no"
+		cmd = "pacman -Qi " + q + " >/dev/null 2>&1 && echo yes || echo no"
 	case "zypper":
 		// openSUSE is RPM-based — use the same rpm check as dnf
-		cmd = "rpm -q --whatprovides " + pkg + " >/dev/null 2>&1 && echo yes || echo no"
+		cmd = "rpm -q --whatprovides " + q + " >/dev/null 2>&1 && echo yes || echo no"
 	}
 	out, err := s.Run(cmd)
 	if err != nil {
