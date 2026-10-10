@@ -29,6 +29,8 @@ type Play struct {
 	// RolesPath is the base directory for roles (flag --roles-path).
 	FileDir   string `yaml:"-"`
 	RolesPath string `yaml:"-"`
+	// Outputs are evaluated once per play (first host's vars) and printed.
+	Outputs map[string]string `yaml:"output"`
 }
 
 type PlayTask struct {
@@ -83,6 +85,7 @@ func loadPlaybookBytes(data []byte, dir, rolesDir string) ([]Play, error) {
 		Roles       []interface{}            `yaml:"roles"`
 		MaxFailPct  *int                     `yaml:"max_fail_percentage"`
 		AnyErrors   *bool                    `yaml:"any_errors_fatal"`
+		Outputs     map[string]string        `yaml:"output"`
 	}
 
 	if err := yaml.Unmarshal(data, &rawPlays); err != nil {
@@ -145,6 +148,7 @@ func loadPlaybookBytes(data []byte, dir, rolesDir string) ([]Play, error) {
 			GatherFacts:    gatherFacts,
 			MaxFailPct:     rp.MaxFailPct,
 			AnyErrorsFatal: anyFatal,
+			Outputs:        rp.Outputs,
 		})
 	}
 	return plays, nil

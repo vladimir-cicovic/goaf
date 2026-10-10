@@ -23,6 +23,7 @@ type RunOptions struct {
 	SkipTags    []string // never run tasks with these tags
 	Limit       string   // restrict to hosts matching this group/host expression
 	Serial      int      // max hosts per batch, 0 = all at once
+	SerialPct   int      // ...or percent of hosts per batch (0 = unused)
 	FactsTTL    int      // reuse cached facts younger than this (seconds, 0 = disabled)
 	FlushCache  bool     // ignore (and refresh) cached facts
 }
@@ -114,15 +115,21 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 		}
 
 		abortedRun := false
-		for _, batch := range splitBatches(fresh, opts.Serial) {
+		lastFacts := map[string]Facts{}
+		for _, batch := range splitBatches(fresh, effectiveSerial(opts, len(fresh))) {
 			if abortedRun {
 				break
 			}
 			var aborted bool
 			var n int
-			n, aborted = runBatch(batch, play, inv, opts, stats, registeredVars)
+			var facts map[string]Facts
+			n, aborted, facts = runBatch(batch, play, inv, opts, stats, registeredVars)
 			totalFailed += n
 			abortedRun = aborted
+			lastFacts = facts
+		}
+		if len(play.Outputs) > 0 && len(fresh) > 0 {
+			printPlayOutputs(play, inv, fresh[0], lastFacts, registeredVars, report)
 		}
 		if abortedRun {
 			break
@@ -148,8 +155,9 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 
 // runBatch connects one batch of hosts once (connection reuse), gathers facts
 // on those connections, runs all tasks and handlers, then closes everything.
-// Returns failures and whether the run was aborted (any_errors_fatal / max_fail_percentage).
-func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats map[string]*hostStats, registeredVars map[string]map[string]string) (int, bool) {
+// Returns failures, whether the run was aborted (any_errors_fatal /
+// max_fail_percentage), and the last gathered facts (for play outputs).
+func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats map[string]*hostStats, registeredVars map[string]map[string]string) (int, bool, map[string]Facts) {
 	totalFailed := 0
 
 	sessions, connErrs := connectAll(batch, opts.Parallelism)
@@ -185,7 +193,7 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 		lr.flushHandlers()
 	}
 
-	return totalFailed, lr.aborted
+	return totalFailed, lr.aborted, allFacts
 }
 
 // listRunner carries shared state for executing a task list.
@@ -699,6 +707,24 @@ func (c *listRunner) makeModule(task PlayTask, h Host, item string) (Module, err
 	return factory(expanded)
 }
 
+// printPlayOutputs evaluates play `output` values with the first host's
+// vars and prints them (also stored in the report).
+func printPlayOutputs(play Play, inv *Inventory, h Host, facts map[string]Facts, registeredVars map[string]map[string]string, report *RunReport) {
+	vars := taskVars(inv, play, h, "", facts, registeredVars)
+	for name, tmpl := range play.Outputs {
+		expanded, err := expandVars(map[string]string{"v": tmpl}, vars)
+		if err != nil {
+			activeEmitter.Diagnostic(fmt.Sprintf("ERROR in output %q: %v", name, err))
+			continue
+		}
+		activeEmitter.PlayOutput(name, expanded["v"])
+		if report.Outputs == nil {
+			report.Outputs = make(map[string]string)
+		}
+		report.Outputs[name] = expanded["v"]
+	}
+}
+
 // taskVars merges variable layers for one host and task iteration:
 // inventory (group, then host) < play vars < facts < loop item < registered.
 func taskVars(inv *Inventory, play Play, h Host, item string, facts map[string]Facts, registeredVars map[string]map[string]string) map[string]string {
@@ -782,6 +808,17 @@ func intersects(a, b []string) bool {
 		}
 	}
 	return false
+}
+
+// effectiveSerial resolves Serial/SerialPct to a batch size for n hosts.
+func effectiveSerial(opts RunOptions, n int) int {
+	if opts.SerialPct > 0 && n > 0 {
+		if pct := n * opts.SerialPct / 100; pct >= 1 {
+			return pct
+		}
+		return 1
+	}
+	return opts.Serial
 }
 
 // splitBatches splits hosts into batches of at most serial hosts.
