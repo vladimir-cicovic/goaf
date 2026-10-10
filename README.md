@@ -41,6 +41,51 @@ goaf-tui running a playbook:
 
 ![goaf-tui playbook](screenshoots/goaf-tui-playbook.png)
 
+Parallel run on multiple hosts:
+
+![goaf parallel run](screenshoots/paralel-run.jpg)
+
+## Changelog
+
+### ver-0.0.3 - fixes, verified on docker (debian / openSUSE / alpine / arch / fedora)
+
+Fixes:
+- Detect package managers and init systems with `command -v` (POSIX
+  builtin) instead of `which` - works on minimal systems without `which`.
+- Use `path.Dir` (slash semantics) for remote paths, so copy/template
+  work from a Windows control node instead of creating backslash-named
+  directories.
+- Parse `key=value` only for known module parameters; shell code
+  containing `=` (e.g. `grep FOO=bar`) stays positional.
+- `become` runs the whole command via `sudo -n sh -c`, so compound
+  commands (`a && b`) are fully privileged; `--ask-become-pass` (or
+  `GOAF_BECOME_PASSWORD`) feeds the password via stdin when NOPASSWD
+  is not available.
+- Diagnostics go to stderr, keeping the `-json` NDJSON stream pure
+  for `goaf-tui`.
+- Shell-quote package names, paths, service names, users and keys in
+  every module (no more word-splitting or injection via parameters).
+- `$HOME` is trimmed with `os.UserHomeDir()` fallback for SSH paths;
+  `goaf-tui` also finds `goaf.exe` next to itself on Windows.
+
+Features:
+- `register`, `failed_when`, `changed_when`, `ignore_errors` task keys;
+  gathered facts also expand in task params (not only in `when`).
+- Host and group variables in inventory, including per-host
+  user/port/key overrides.
+- `--tags` / `--skip-tags` (with `always`), `--limit`, `--serial`
+  rolling batches; one SSH connection per host per play (reused for
+  facts and all tasks); handlers run only on hosts that notified them.
+- `--diff` unified diffs for copy/template/file/lineinfile;
+  `backup=true` keeps timestamped copies (`.goafbak-<timestamp>`).
+- New modules: `user`, `lineinfile`, `authorized_key`, `reboot`
+  (waits for a new kernel boot id), `upgrade`.
+- `validate` command (no connections), `vault encrypt|decrypt` with
+  `$GOAFVAULT` values in playbook vars.
+- Go unit tests, GitHub Actions CI, goreleaser config.
+- `goaf-tui` records run history (`~/.goaf/history`, `--history` lists
+  past runs) and displays ignored results and diffs.
+
 ## TODO
 -  Add sudo password usage
 -  More checks
