@@ -481,6 +481,18 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 				failed[r.Host] = true
 				c.noteFailure(r.Host)
 			}
+			// Record applied remote changes for drift detection.
+			// Always-run modules (no idempotent desired state) are skipped:
+			// their Check is trivially true, so drift would flag them forever.
+			switch task.Module {
+			case "debug", "set_fact", "meta", "command", "upgrade", "reboot", "script", "setup":
+			default:
+				if r.Changed && r.Err == nil && !c.opts.CheckMode && task.DelegateTo == "" {
+					if expanded, err := c.expandTask(task, h, item); err == nil {
+						recordState(h, c.play.Name, task.Module, expanded, r.Output)
+					}
+				}
+			}
 			// ### notify ### — only hosts that changed without failing
 			if r.Changed && r.Err == nil && task.Notify != "" {
 				if c.notified[task.Notify] == nil {
@@ -687,6 +699,19 @@ func (c *listRunner) flushHandlers() int {
 // makeModule expands task params for one host and builds the module,
 // resolving role file paths (files//templates/) for role tasks.
 func (c *listRunner) makeModule(task PlayTask, h Host, item string) (Module, error) {
+	expanded, err := c.expandTask(task, h, item)
+	if err != nil {
+		return nil, err
+	}
+	factory, ok := LookupModule(task.Module)
+	if !ok {
+		return nil, fmt.Errorf("unknown module %q", task.Module)
+	}
+	return factory(expanded)
+}
+
+// expandTask expands task params for one host (role file resolution included).
+func (c *listRunner) expandTask(task PlayTask, h Host, item string) (map[string]string, error) {
 	vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
 	expanded, err := expandVars(task.Params, vars)
 	if err != nil {
@@ -700,11 +725,7 @@ func (c *listRunner) makeModule(task PlayTask, h Host, item string) (Module, err
 			}
 		}
 	}
-	factory, ok := LookupModule(task.Module)
-	if !ok {
-		return nil, fmt.Errorf("unknown module %q", task.Module)
-	}
-	return factory(expanded)
+	return expanded, nil
 }
 
 // printPlayOutputs evaluates play `output` values with the first host's

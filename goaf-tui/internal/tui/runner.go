@@ -226,10 +226,13 @@ func formatEvent(ev eventMsg) []string {
 		}
 
 	case "diagnostic":
-		return []string{"  ℹ " + str("msg")}
+		return []string{"  ??? " + str("msg")}
 
 	case "stderr":
 		return []string{"  ! " + str("msg")}
+
+	case "play_output":
+		return []string{fmt.Sprintf("  output: %s = %s", str("name"), str("value"))}
 	}
 	return nil
 }

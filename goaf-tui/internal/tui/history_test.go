@@ -72,6 +72,36 @@ func TestHistoryRotate(t *testing.T) {
 	}
 }
 
+func TestLoadHistoryLines(t *testing.T) {
+	testHome(t)
+	dir, err := historyDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "20240101-120000-adhoc"
+	ndjson := "{\"type\":\"task_started\",\"task\":\"uptime\"}\n" +
+		"{\"type\":\"task_result\",\"host\":\"h1\",\"status\":\"changed\",\"output\":\"hi\"}\n" +
+		"{\"type\":\"play_output\",\"name\":\"ver\",\"value\":\"1.0\"}\n" +
+		"not-json\n" +
+		"{\"type\":\"run_finished\",\"ok\":1,\"changed\":1,\"failed\":0}\n"
+	if err := os.WriteFile(filepath.Join(dir, id+".ndjson"), []byte(ndjson), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := loadHistoryLines(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"REPLAY " + id, "uptime", "h1", "hi", "output: ver = 1.0", "Done"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("replay missing %q:\n%s", want, joined)
+		}
+	}
+	if _, err := loadHistoryLines("nope-missing"); err == nil {
+		t.Error("expected error for missing run")
+	}
+}
+
 func TestRunMode(t *testing.T) {
 	if got := runMode([]string{"-i", "inv.yml", "run", "site.yml"}); got != "playbook" {
 		t.Errorf("got %q", got)
