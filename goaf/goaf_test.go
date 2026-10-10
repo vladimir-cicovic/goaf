@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -184,7 +186,7 @@ func TestParseTasks(t *testing.T) {
   handlers:
     - name: H
       command: echo hi
-`))
+`), "", "roles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +206,220 @@ func TestParseTasks(t *testing.T) {
 	}
 	if len(plays[0].Handlers) != 1 {
 		t.Error("handlers not parsed")
+	}
+}
+
+func TestParseBlock(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  pre_tasks:
+    - name: Pre
+      command: uptime
+  tasks:
+    - name: Deploy
+      block:
+        - name: Do it
+          command: uptime
+        - name: Might fail
+          command: "exit 1"
+      rescue:
+        - name: Fix
+          command: uptime
+      always:
+        - name: Clean
+          command: uptime
+      when: '{{eq .env "prod"}}'
+  post_tasks:
+    - name: Post
+      command: uptime
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plays) != 1 {
+		t.Fatalf("got %d plays", len(plays))
+	}
+	p := plays[0]
+	if len(p.PreTasks) != 1 || len(p.PostTasks) != 1 {
+		t.Errorf("pre/post not parsed: %+v", p)
+	}
+	if len(p.Tasks) != 1 {
+		t.Fatalf("got %d tasks", len(p.Tasks))
+	}
+	b := p.Tasks[0]
+	if b.Module != "block" || len(b.Block) != 2 || len(b.Rescue) != 1 || len(b.Always) != 1 {
+		t.Errorf("bad block parse: %+v", b)
+	}
+	if b.When == "" {
+		t.Error("block when not parsed")
+	}
+}
+
+func TestParseRunOnceDelegate(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  tasks:
+    - name: Once
+      command: uptime
+      run_once: true
+      delegate_to: localhost
+      tags: always
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := plays[0].Tasks[0]
+	if !task.RunOnce || task.DelegateTo != "localhost" {
+		t.Errorf("bad parse: %+v", task)
+	}
+	if len(task.Tags) != 1 || task.Tags[0] != "always" {
+		t.Errorf("bad tags: %+v", task.Tags)
+	}
+}
+
+func TestParseDebugSetFact(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  tasks:
+    - name: D1
+      debug: var=osline
+    - name: D2
+      debug: {msg: "hi {{.x}}"}
+    - name: S1
+      set_fact: {a: "1", b: "2"}
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := plays[0].Tasks
+	if tasks[0].Module != "debug" || tasks[0].Params["var"] != "osline" {
+		t.Errorf("bad debug shorthand: %+v", tasks[0])
+	}
+	if tasks[1].Params["msg"] != "hi {{.x}}" {
+		t.Errorf("bad debug map: %+v", tasks[1])
+	}
+	if tasks[2].Module != "set_fact" || tasks[2].Params["b"] != "2" {
+		t.Errorf("bad set_fact: %+v", tasks[2])
+	}
+}
+
+func TestParseInventoryBytes(t *testing.T) {
+	inv, err := parseInventoryBytes([]byte(`groups:
+  web:
+    hosts: [h1]
+    vars: {role: web}
+hosts:
+  h1: {vars: {role: special}}
+vars: {user: root}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := inv.varsForHost(Host{Addr: "h1", User: "root", Port: 22}); v["role"] != "special" {
+		t.Errorf("host var should win: %v", v)
+	}
+}
+
+func TestIsInventoryFile(t *testing.T) {
+	for _, p := range []string{"a.yml", "a.yaml", "a.json", "A.YML"} {
+		if !isInventoryFile(p) {
+			t.Errorf("%q should be inventory file", p)
+		}
+	}
+	for _, p := range []string{"gen.sh", "gen.bat", "gen.ps1", "noext"} {
+		if isInventoryFile(p) {
+			t.Errorf("%q should not be inventory file", p)
+		}
+	}
+}
+
+func TestParseRetriesUntilMeta(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  max_fail_percentage: 30
+  any_errors_fatal: true
+  tasks:
+    - name: Retry me
+      command: uptime
+      retries: 5
+      delay: 3
+      until: '{{eq .result "ok"}}'
+    - name: Flush now
+      meta: flush_handlers
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if p.MaxFailPct == nil || *p.MaxFailPct != 30 || !p.AnyErrorsFatal {
+		t.Errorf("bad play abort keys: %+v", p)
+	}
+	rt := p.Tasks[0]
+	if rt.Retries != 5 || rt.Delay != 3 || rt.Until == "" {
+		t.Errorf("bad retry parse: %+v", rt)
+	}
+	if p.Tasks[1].Module != "meta" {
+		t.Errorf("bad meta parse: %+v", p.Tasks[1])
+	}
+}
+
+func TestExpandRoles(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("roles/web/tasks/main.yml", "- name: Deploy\n  command: uptime\n")
+	mk("roles/web/handlers/main.yml", "- name: Restart\n  command: uptime\n")
+	mk("roles/web/vars/main.yml", "port: \"9090\"\n")
+	mk("roles/web/defaults/main.yml", "port: \"80\"\nfb: dflt\n")
+	mk("roles/web/files/app.txt", "x")
+	mk("site.yml", "- name: p\n  hosts: all\n  vars: {port: \"7070\"}\n  roles:\n    - web\n")
+
+	data, err := os.ReadFile(filepath.Join(dir, "site.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes(data, dir, filepath.Join(dir, "roles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if len(p.Tasks) != 1 || len(p.Handlers) != 1 {
+		t.Fatalf("bad role expansion: %+v", p)
+	}
+	if !strings.HasPrefix(p.Tasks[0].Name, "web : ") {
+		t.Errorf("role prefix missing: %q", p.Tasks[0].Name)
+	}
+	if p.Tasks[0].RoleDir == "" {
+		t.Error("RoleDir not set")
+	}
+	if p.Vars["port"] != "9090" || p.Vars["fb"] != "dflt" {
+		t.Errorf("bad var merge: %v", p.Vars)
+	}
+}
+
+func TestIncludeTasks(t *testing.T) {
+	dir := t.TempDir()
+	inc := filepath.Join(dir, "common.yml")
+	if err := os.WriteFile(inc, []byte("- name: Inc\n  command: uptime\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  tasks:\n    - name: Wrapper\n      include_tasks: common.yml\n"), dir, "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plays[0].Tasks) != 1 || plays[0].Tasks[0].Module != "block" {
+		t.Fatalf("include not spliced as block: %+v", plays[0].Tasks)
+	}
+	if len(plays[0].Tasks[0].Block) != 1 || plays[0].Tasks[0].Block[0].Name != "Inc" {
+		t.Errorf("bad include content: %+v", plays[0].Tasks[0])
 	}
 }
 

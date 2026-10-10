@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // splitFlag parses "-name", "--name" and "--name=value" (also single dash).
@@ -44,6 +48,9 @@ func main() {
 	serialStr := ""
 	vaultPassFileFlag := ""
 	askVaultPass := false
+	savePlan := ""
+	factsTTLStr := ""
+	flushCache := false
 	filtered := os.Args[:1]
 	for _, a := range os.Args[1:] {
 		name, val, hasVal := splitFlag(a)
@@ -79,6 +86,20 @@ func main() {
 		case "vault-pass-file":
 			if hasVal {
 				vaultPassFileFlag = val
+			}
+		case "save-plan":
+			if hasVal {
+				savePlan = val
+			}
+		case "facts-ttl":
+			if hasVal {
+				factsTTLStr = val
+			}
+		case "flush-cache":
+			flushCache = true
+		case "roles-path":
+			if hasVal {
+				rolesPath = val
 			}
 		default:
 			filtered = append(filtered, a)
@@ -131,6 +152,18 @@ func main() {
 		return
 	}
 
+	// apply: run a saved plan file (playbook + inventory + options snapshot)
+	if args[0] == "apply" {
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: goaf apply <plan.json> [--check]")
+			os.Exit(1)
+		}
+		if code := runApply(args[1], *parallel, checkMode, *reportPath); code != 0 {
+			os.Exit(code)
+		}
+		return
+	}
+
 	// validate: parse playbook + inventory without connecting anywhere
 	if args[0] == "validate" {
 		if len(args) < 2 {
@@ -169,10 +202,20 @@ func main() {
 		opts := RunOptions{
 			Parallelism: *parallel,
 			CheckMode:   checkMode,
+			Become:      becomeMode,
 			Tags:        tags,
 			SkipTags:    skipTags,
 			Limit:       limitStr,
 			Serial:      parseSerial(serialStr),
+			FactsTTL:    parseFactsTTL(factsTTLStr),
+			FlushCache:  flushCache,
+		}
+		if savePlan != "" {
+			if err := savePlanFile(savePlan, args[1], *invPath, opts, becomeMode); err != nil {
+				fmt.Fprintf(os.Stderr, "error saving plan: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "plan saved to %s\n", savePlan)
 		}
 		activeEmitter.RunStarted("playbook", 0, *parallel, checkMode)
 		failed, report := RunPlaybookOpts(plays, inv, opts)
@@ -310,6 +353,9 @@ var knownCLIParams = map[string]map[string]bool{
 	"lineinfile":     {"path": true, "line": true, "regexp": true, "state": true},
 	"authorized_key": {"user": true, "key": true, "state": true},
 	"reboot":         {"timeout": true, "msg": true},
+	"debug":          {"var": true, "msg": true},
+	"script":         {"src": true, "args": true},
+	"fetch":          {"src": true, "dest": true},
 }
 
 // isKVArg reports whether s is a key=value pair valid for the given action.
@@ -325,8 +371,8 @@ func isKVArg(action, s string) bool {
 		}
 		return false
 	}
-	if action == "template" {
-		return true // any key=value is a template variable
+	if action == "template" || action == "set_fact" {
+		return true // any key=value is a variable
 	}
 	allowed, ok := knownCLIParams[action]
 	return ok && allowed[key]
@@ -414,6 +460,142 @@ func parseSerial(s string) int {
 	return n
 }
 
+// parseFactsTTL parses --facts-ttl=N (seconds, default 3600).
+func parseFactsTTL(s string) int {
+	if s == "" {
+		return 3600
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "invalid --facts-ttl value %q (want seconds >= 0, 0 disables cache)\n", s)
+		os.Exit(1)
+	}
+	return n
+}
+
+// runPlan is a saved playbook run: playbook + inventory contents and the
+// run options, so `apply` reproduces the exact same run later.
+type runPlan struct {
+	Version       int      `json:"version"`
+	Created       string   `json:"created"`
+	PlaybookName  string   `json:"playbook"`
+	PlaybookB64   string   `json:"playbook_b64"`
+	InventoryName string   `json:"inventory"`
+	InventoryB64  string   `json:"inventory_b64"`
+	Parallelism   int      `json:"parallelism"`
+	Become        bool     `json:"become"`
+	Tags          []string `json:"tags"`
+	SkipTags      []string `json:"skip_tags"`
+	Limit         string   `json:"limit"`
+	Serial        int      `json:"serial"`
+}
+
+// savePlanFile snapshots the playbook/inventory files and run options.
+func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bool) error {
+	pbData, err := os.ReadFile(playbookPath)
+	if err != nil {
+		return err
+	}
+	invData, err := os.ReadFile(invPath)
+	if err != nil {
+		return err
+	}
+	plan := runPlan{
+		Version:       1,
+		Created:       time.Now().Format(time.RFC3339),
+		PlaybookName:  filepath.Base(playbookPath),
+		PlaybookB64:   base64.StdEncoding.EncodeToString(pbData),
+		InventoryName: filepath.Base(invPath),
+		InventoryB64:  base64.StdEncoding.EncodeToString(invData),
+		Parallelism:   opts.Parallelism,
+		Become:        become,
+		Tags:          opts.Tags,
+		SkipTags:      opts.SkipTags,
+		Limit:         opts.Limit,
+		Serial:        opts.Serial,
+	}
+	data, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// runApply executes a saved plan file. --check forces dry-run on top.
+func runApply(planPath string, parallel int, forceCheck bool, reportPath string) int {
+	_ = parallel
+	raw, err := os.ReadFile(planPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading plan: %v\n", err)
+		return 1
+	}
+	var plan runPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing plan: %v\n", err)
+		return 1
+	}
+	if plan.Version != 1 {
+		fmt.Fprintf(os.Stderr, "unsupported plan version %d\n", plan.Version)
+		return 1
+	}
+	pbData, err := base64.StdEncoding.DecodeString(plan.PlaybookB64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error decoding plan playbook: %v\n", err)
+		return 1
+	}
+	invData, err := base64.StdEncoding.DecodeString(plan.InventoryB64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error decoding plan inventory: %v\n", err)
+		return 1
+	}
+	tmpDir, err := os.MkdirTemp("", "goaf-plan-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp dir: %v\n", err)
+		return 1
+	}
+	defer os.RemoveAll(tmpDir)
+	pbPath := filepath.Join(tmpDir, plan.PlaybookName)
+	invPath := filepath.Join(tmpDir, plan.InventoryName)
+	if err := os.WriteFile(pbPath, pbData, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(invPath, invData, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	inv, err := LoadInventory(invPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading plan inventory: %v\n", err)
+		return 1
+	}
+	plays, err := loadPlaybook(pbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading plan playbook: %v\n", err)
+		return 1
+	}
+	opts := RunOptions{
+		Parallelism: plan.Parallelism,
+		CheckMode:   forceCheck,
+		Become:      plan.Become,
+		Tags:        plan.Tags,
+		SkipTags:    plan.SkipTags,
+		Limit:       plan.Limit,
+		Serial:      plan.Serial,
+	}
+	activeEmitter.RunStarted("playbook", 0, opts.Parallelism, opts.CheckMode)
+	failed, report := RunPlaybookOpts(plays, inv, opts)
+	if reportPath != "" {
+		if err := writeReport(report, reportPath); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
+		}
+	}
+	if failed > 0 {
+		return 2
+	}
+	return 0
+}
+
 // runVault implements `goaf vault encrypt|decrypt [value]`.
 // Without a value the data is read from stdin.
 func runVault(args []string, passFile string, askPass bool) {
@@ -479,46 +661,38 @@ func runValidate(playPath, invPath string) int {
 		for _, h := range play.Handlers {
 			handlers[h.Name] = true
 		}
-		// Dummy context for validation: loop items, gathered facts and
-		// registered names only exist at runtime — provide placeholders so
-		// only genuinely broken templates fail validation.
+		// Dummy context for validation: loop items, gathered facts,
+		// registered and set_fact names only exist at runtime — provide
+		// placeholders so only genuinely broken templates fail validation.
 		dummyVars := map[string]string{"item": "ITEM"}
 		for _, f := range []string{"goaf_hostname", "goaf_arch", "goaf_kernel", "goaf_ip", "goaf_os", "goaf_os_name", "goaf_os_version", "goaf_os_family"} {
 			dummyVars[f] = "FACT"
 		}
-		for _, t := range play.Tasks {
-			if t.Register != "" {
-				dummyVars[t.Register] = "REGISTERED"
-			}
-		}
-		checkVars := mergeVars(play.Vars, dummyVars)
-		playFailed := 0
-		for _, t := range play.Tasks {
-			factory, ok := LookupModule(t.Module)
-			if !ok {
-				fmt.Printf("PLAY [%s] task %q: unknown module %q\n", play.Name, t.Name, t.Module)
-				playFailed++
-				continue
-			}
-			if _, err := expandVars(t.Params, checkVars); err != nil {
-				fmt.Printf("PLAY [%s] task %q: %v\n", play.Name, t.Name, err)
-				playFailed++
-				continue
-			}
-			for _, expr := range []string{t.When, t.FailedWhen, t.ChangedWhen} {
-				if expr != "" {
-					if _, err := evalWhen(expr, checkVars); err != nil {
-						fmt.Printf("PLAY [%s] task %q: bad condition: %v\n", play.Name, t.Name, err)
-						playFailed++
-						break
+		var collectRuntimeVars func(tasks []PlayTask)
+		collectRuntimeVars = func(tasks []PlayTask) {
+			for _, t := range tasks {
+				if t.Register != "" {
+					dummyVars[t.Register] = "REGISTERED"
+				}
+				if t.Module == "set_fact" {
+					for k := range t.Params {
+						dummyVars[k] = "FACT"
 					}
 				}
+				if t.Module == "block" {
+					collectRuntimeVars(t.Block)
+					collectRuntimeVars(t.Rescue)
+					collectRuntimeVars(t.Always)
+				}
 			}
-			_ = factory
-			if t.Notify != "" && !handlers[t.Notify] {
-				fmt.Printf("PLAY [%s] task %q: notify target %q has no handler\n", play.Name, t.Name, t.Notify)
-				playFailed++
-			}
+		}
+		collectRuntimeVars(play.PreTasks)
+		collectRuntimeVars(play.Tasks)
+		collectRuntimeVars(play.PostTasks)
+		checkVars := mergeVars(play.Vars, dummyVars)
+		playFailed := 0
+		for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
+			playFailed += validateTaskList(play.Name, section, checkVars, handlers)
 		}
 		if playFailed == 0 {
 			fmt.Printf("PLAY [%s]: OK (%d hosts, %d tasks)\n", play.Name, len(hosts), len(play.Tasks))
@@ -534,14 +708,61 @@ func runValidate(playPath, invPath string) int {
 	return 0
 }
 
+// validateTaskList checks one task list (recursing into blocks).
+func validateTaskList(playName string, tasks []PlayTask, checkVars map[string]string, handlers map[string]bool) int {
+	failed := 0
+	for _, t := range tasks {
+		if t.Module == "block" {
+			if len(t.Block) == 0 {
+				fmt.Printf("PLAY [%s] task %q: block is empty\n", playName, t.Name)
+				failed++
+				continue
+			}
+			for _, sub := range [][]PlayTask{t.Block, t.Rescue, t.Always} {
+				failed += validateTaskList(playName, sub, checkVars, handlers)
+			}
+			continue
+		}
+		factory, ok := LookupModule(t.Module)
+		if !ok {
+			fmt.Printf("PLAY [%s] task %q: unknown module %q\n", playName, t.Name, t.Module)
+			failed++
+			continue
+		}
+		if _, err := expandVars(t.Params, checkVars); err != nil {
+			fmt.Printf("PLAY [%s] task %q: %v\n", playName, t.Name, err)
+			failed++
+			continue
+		}
+		for _, expr := range []string{t.When, t.FailedWhen, t.ChangedWhen, t.Until} {
+			if expr != "" {
+				if _, err := evalWhen(expr, checkVars); err != nil {
+					fmt.Printf("PLAY [%s] task %q: bad condition: %v\n", playName, t.Name, err)
+					failed++
+					break
+				}
+			}
+		}
+		_ = factory
+		if t.Notify != "" && !handlers[t.Notify] {
+			fmt.Printf("PLAY [%s] task %q: notify target %q has no handler\n", playName, t.Name, t.Notify)
+			failed++
+		}
+	}
+	return failed
+}
+
 func usage() {
 	fmt.Println("Usage:")
 	fmt.Println("  goaf [-check] [-json] [-diff] -i inventory.yml -t <group|host> <module> [params]")
 	fmt.Println("  goaf [-check] [-json] [-diff] -i inventory.yml run <playbook.yml>")
 	fmt.Println("  goaf -i inventory.yml validate <playbook.yml>")
+	fmt.Println("  goaf -i inventory.yml run <playbook.yml> --save-plan=<plan.json>")
+	fmt.Println("  goaf apply <plan.json> [--check]")
 	fmt.Println("  goaf vault encrypt|decrypt [value|-]")
 	fmt.Println("\nFlags:")
-	fmt.Println("  -i <path>       inventory file (default: inventory.yml)")
+	fmt.Println("  -i <path>       inventory file (default: inventory.yml);")
+	fmt.Println("                  exec:<command> or an executable script = dynamic inventory")
 	fmt.Println("  -t <target>     group name or host:port for ad-hoc")
 	fmt.Println("  -p <n>          parallelism (default: 10)")
 	fmt.Println("  -check          dry-run — show what would change, skip Apply()")
@@ -556,6 +777,8 @@ func usage() {
 	fmt.Println("  --serial=<n>    max hosts per batch — rolling update (playbook mode)")
 	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
+	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
+	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("\nModules (ad-hoc):")
 	fmt.Println("  command  \"<shell command>\"")
 	fmt.Println("  install  <package>")
@@ -569,13 +792,19 @@ func usage() {
 	fmt.Println("  user     name=<user> [state=present|absent] [shell=<sh>] [groups=a,b]")
 	fmt.Println("  authorized_key user=<user> key=\"<pubkey>\" [state=present|absent]")
 	fmt.Println("  reboot   [timeout=300] (reboot and wait for SSH)")
+	fmt.Println("  script   src=<script> [args=<args>] (upload and execute, Linux-only)")
+	fmt.Println("  fetch    src=<remote> dest=<local> (download file)")
+	fmt.Println("  debug    var=<name> | msg=\"<text>\" (playbook: show value)")
+	fmt.Println("  set_fact <key=value ...> (playbook: define host variables)")
 	fmt.Println("  setup    (display gathered host facts: os, hostname, arch, kernel, ip)")
 	fmt.Println("\nPlaybook (run):")
 	fmt.Println("  goaf -i inventory.yml run site.yml")
 	fmt.Println("  goaf -check -i inventory.yml run site.yml   # dry-run")
 	fmt.Println("  goaf -json  -i inventory.yml run site.yml   # NDJSON output")
 	fmt.Println("\nPlaybook task keys: when, failed_when, changed_when, ignore_errors,")
-	fmt.Println("  register, loop/with_items, notify, tags (+ top-level handlers:)")
+	fmt.Println("  register, loop/with_items, notify, tags, run_once, delegate_to,")
+	fmt.Println("  block/rescue/always, retries/delay/until, meta (+ pre_tasks/post_tasks,")
+	fmt.Println("  max_fail_percentage/any_errors_fatal, top-level handlers:)")
 	fmt.Println("\nExamples:")
 	fmt.Println("  goaf -t web command \"uptime\"")
 	fmt.Println("  goaf -t web install nginx")

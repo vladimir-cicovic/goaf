@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,10 +94,91 @@ type Host struct {
 
 // LoadInventory reads and parses a YAML inventory file from the given path.
 func LoadInventory(path string) (*Inventory, error) {
+	// Dynamic inventory: `exec:<command>` runs a command and parses its
+	// stdout as inventory YAML/JSON. An existing non-YAML executable file
+	// (script) is executed the same way.
+	if strings.HasPrefix(path, "exec:") {
+		return loadInventoryExec(strings.TrimPrefix(path, "exec:"))
+	}
+	if st, err := os.Stat(path); err == nil && !st.IsDir() && !isInventoryFile(path) && isExecutableFile(path) {
+		return loadInventoryExec(scriptCommand(path))
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return parseInventoryBytes(data)
+}
+
+// loadInventoryExec runs a command and parses its stdout as inventory.
+func loadInventoryExec(command string) (*Inventory, error) {
+	out, err := runInventoryCommand(command)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic inventory %q: %w: %s", command, err, strings.TrimSpace(out))
+	}
+	return parseInventoryBytes([]byte(out))
+}
+
+// runInventoryCommand executes command through the system shell and
+// returns combined stdout (stderr is appended to the error only).
+func runInventoryCommand(command string) (string, error) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// isInventoryFile reports YAML/JSON inventory files (parsed, not executed).
+func isInventoryFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".json")
+}
+
+// isExecutableFile reports scripts runnable as dynamic inventory.
+func isExecutableFile(path string) bool {
+	lower := strings.ToLower(path)
+	for _, ext := range []string{".sh", ".bat", ".cmd", ".ps1", ".py", ".exe"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	if st, err := os.Stat(path); err == nil {
+		return st.Mode()&0o111 != 0
+	}
+	return false
+}
+
+// shellQuote quotes one local shell word (POSIX single quotes, double
+// quotes on Windows — cmd.exe does not understand single quotes).
+// NOTE: only for control-node paths; remote commands use shQuote.
+func shellQuote(s string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + s + `"`
+	}
+	return shQuote(s)
+}
+
+// scriptCommand builds the shell command running a script file.
+// PowerShell scripts need powershell.exe explicitly, even on Windows.
+// NOTE: on Windows the path stays unquoted for cmd.exe scripts — Go escapes
+// embedded double quotes with backslashes, which cmd.exe cannot parse
+// (powershell.exe understands them, so .ps1 stays quoted). Consequence:
+// script paths with spaces do not work on Windows; use short paths.
+func scriptCommand(path string) string {
+	if strings.HasSuffix(strings.ToLower(path), ".ps1") {
+		return "powershell -NoProfile -ExecutionPolicy Bypass -File " + shellQuote(path)
+	}
+	if runtime.GOOS == "windows" {
+		return path
+	}
+	return shellQuote(path)
+}
+
+func parseInventoryBytes(data []byte) (*Inventory, error) {
 	var inv Inventory
 	if err := yaml.Unmarshal(data, &inv); err != nil {
 		return nil, err

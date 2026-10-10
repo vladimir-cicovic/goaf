@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -44,6 +47,41 @@ func waitForReboot(s *Session, timeoutSec int, oldBootID string) error {
 	}
 	return fmt.Errorf("host did not come back with a new boot within %ds on %s", timeoutSec, addr)
 }
+
+// ---------- debug / set_fact modules ----------
+// Both are control-side: the playbook runner intercepts them before any SSH
+// (debug prints a variable/message, set_fact merges into host vars).
+// The stubs below only exist so ad-hoc mode and validate accept the names.
+
+type DebugModule struct {
+	Var string
+	Msg string
+}
+
+func (m DebugModule) Name() string                     { return "debug" }
+func (m DebugModule) Check(_ *Session) (bool, error)   { return false, nil }
+func (m DebugModule) Apply(_ *Session) (string, error) { return "", nil }
+
+type SetFactModule struct {
+	Vars map[string]string
+}
+
+func (m SetFactModule) Name() string                     { return "set_fact" }
+func (m SetFactModule) Check(_ *Session) (bool, error)   { return false, nil }
+func (m SetFactModule) Apply(_ *Session) (string, error) { return "", nil }
+
+// ---------- meta pseudo-module ----------
+// Meta tasks (flush_handlers) are control-side: the runner intercepts them.
+// This stub only exists so ad-hoc mode fails with a clear message instead
+// of "unknown module".
+
+type MetaModule struct{}
+
+func (m MetaModule) Name() string { return "meta" }
+func (m MetaModule) Check(_ *Session) (bool, error) {
+	return false, fmt.Errorf("meta tasks are playbook-only (flush_handlers)")
+}
+func (m MetaModule) Apply(_ *Session) (string, error) { return "", nil }
 
 // ---------- user module ----------
 // Manages local user accounts (needs privilege: sudo is used internally,
@@ -201,6 +239,102 @@ func (m LineinfileModule) Diff(s *Session) (string, error) {
 		return "", err
 	}
 	return unifiedDiff(m.Path, m.Path, string(remote), want, 3), nil
+}
+
+// ---------- script module ----------
+// Uploads a local script to the host and executes it (always runs,
+// like the command module). Linux-only (executed with sh).
+
+type ScriptModule struct {
+	Src  string // local script path
+	Args string // arguments appended after the script path
+}
+
+func (m ScriptModule) Name() string { return "script" }
+
+func (m ScriptModule) Check(_ *Session) (bool, error) { return true, nil }
+
+func (m ScriptModule) Apply(s *Session) (string, error) {
+	remote := "/tmp/.goaf-script-" + fmt.Sprintf("%d", time.Now().UnixNano()) + ".sh"
+	if err := s.Upload(m.Src, remote); err != nil {
+		return "", err
+	}
+	// Best-effort cleanup; the run result matters, not the rm.
+	defer func() {
+		_, _ = s.Run("rm -f " + shQuote(remote))
+	}()
+	if _, err := s.Run("chmod +x " + shQuote(remote)); err != nil {
+		return "", fmt.Errorf("chmod script: %w", err)
+	}
+	cmd := "sh " + shQuote(remote)
+	if m.Args != "" {
+		cmd += " " + m.Args
+	}
+	out, err := s.Run(cmd)
+	out = strings.TrimSpace(out)
+	if err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// ---------- fetch module ----------
+// Downloads a remote file to the control node (reverse of copy).
+
+type FetchModule struct {
+	Src  string // remote path
+	Dest string // local path; when an existing directory, keeps the file name
+}
+
+func (m FetchModule) Name() string { return "fetch" }
+
+func (m FetchModule) Check(s *Session) (bool, error) {
+	local, err := m.localPath()
+	if err != nil {
+		return false, err
+	}
+	want, err := os.ReadFile(local)
+	if err != nil {
+		return true, nil // missing locally → download
+	}
+	remote, err := s.ReadRemote(m.Src)
+	if err != nil {
+		return false, fmt.Errorf("reading remote file: %w", err)
+	}
+	return string(remote) != string(want), nil
+}
+
+func (m FetchModule) Apply(s *Session) (string, error) {
+	local, err := m.localPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+		return "", err
+	}
+	remote, err := s.ReadRemote(m.Src)
+	if err != nil {
+		return "", fmt.Errorf("reading remote file: %w", err)
+	}
+	if err := os.WriteFile(local, remote, 0o644); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("fetched → %s", local), nil
+}
+
+// localPath resolves Dest to a file path: an existing directory or a
+// trailing separator means "keep the remote file name inside Dest".
+func (m FetchModule) localPath() (string, error) {
+	if m.Dest == "" {
+		return "", fmt.Errorf("module 'fetch' requires parameter 'dest'")
+	}
+	if st, err := os.Stat(m.Dest); err == nil && st.IsDir() {
+		return filepath.Join(m.Dest, path.Base(m.Src)), nil
+	}
+	if strings.HasSuffix(m.Dest, "/") || strings.HasSuffix(m.Dest, string(os.PathSeparator)) {
+		return filepath.Join(m.Dest, path.Base(m.Src)), nil
+	}
+	return m.Dest, nil
 }
 
 // ---------- authorized_key module ----------
