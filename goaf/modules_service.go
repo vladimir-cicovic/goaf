@@ -15,11 +15,14 @@ type ServiceModule struct {
 
 func (m ServiceModule) Name() string { return "service" }
 
-func (m ServiceModule) Check(s *Session) (bool, error) {
+func (m ServiceModule) Check(s Remote) (bool, error) {
 	if m.State == "restarted" {
 		return true, nil // restart always changes state
 	}
 
+	if isWinRM(s) {
+		return m.checkWin(s)
+	}
 	init := detectInitSystem(s)
 
 	isActive, err := serviceIsActive(s, init, m.SvcName)
@@ -45,7 +48,10 @@ func (m ServiceModule) Check(s *Session) (bool, error) {
 	return needsChange, nil
 }
 
-func (m ServiceModule) Apply(s *Session) (string, error) {
+func (m ServiceModule) Apply(s Remote) (string, error) {
+	if isWinRM(s) {
+		return m.applyWin(s)
+	}
 	init := detectInitSystem(s)
 	if init == "" {
 		return "", fmt.Errorf("no init system detected (systemd/openrc/sysv)")
@@ -80,7 +86,69 @@ func (m ServiceModule) Apply(s *Session) (string, error) {
 	return strings.Join(actions, "+") + ": " + m.SvcName, nil
 }
 
-func detectInitSystem(s *Session) string {
+// winServiceStatus returns "Running", "Stopped", ... or "" when missing.
+func winServiceStatus(s Remote, name string) string {
+	out, _ := s.Run("(Get-Service -Name " + psQuote(name) + " -ErrorAction SilentlyContinue).Status")
+	return strings.TrimSpace(out)
+}
+
+// checkWin is Check for Windows services.
+func (m ServiceModule) checkWin(s Remote) (bool, error) {
+	if m.State == "restarted" {
+		return true, nil
+	}
+	status := winServiceStatus(s, m.SvcName)
+	if status == "" {
+		return false, fmt.Errorf("service '%s' not found", m.SvcName)
+	}
+	running := status == "Running"
+	needsChange := false
+	switch m.State {
+	case "started":
+		needsChange = !running
+	case "stopped":
+		needsChange = running
+	}
+	if m.Enabled != nil {
+		startup, _ := s.Run("(Get-Service -Name " + psQuote(m.SvcName) + ").StartType")
+		startup = strings.TrimSpace(startup)
+		want := map[bool]string{true: "Automatic", false: "Manual"}[*m.Enabled]
+		if startup != "" && startup != want {
+			needsChange = true
+		}
+	}
+	return needsChange, nil
+}
+
+// applyWin is Apply for Windows services.
+func (m ServiceModule) applyWin(s Remote) (string, error) {
+	var actions []string
+	q := psQuote(m.SvcName)
+	if m.State != "" {
+		cmd := map[string]string{
+			"started":   "Start-Service -Name " + q,
+			"stopped":   "Stop-Service -Name " + q + " -Force",
+			"restarted": "Restart-Service -Name " + q + " -Force",
+		}[m.State]
+		if cmd == "" {
+			return "", fmt.Errorf("unknown service state: %s", m.State)
+		}
+		if _, err := s.Run(cmd); err != nil {
+			return "", fmt.Errorf("'%s %s': %w", m.State, m.SvcName, err)
+		}
+		actions = append(actions, m.State)
+	}
+	if m.Enabled != nil {
+		startup := map[bool]string{true: "Automatic", false: "Manual"}[*m.Enabled]
+		if _, err := s.Run("Set-Service -Name " + q + " -StartupType " + startup); err != nil {
+			return "", fmt.Errorf("changing startup type of '%s': %w", m.SvcName, err)
+		}
+		actions = append(actions, map[bool]string{true: "enabled", false: "disabled"}[*m.Enabled])
+	}
+	return strings.Join(actions, "+") + ": " + m.SvcName, nil
+}
+
+func detectInitSystem(s Remote) string {
 	// systemd: /run/systemd/system exists only when systemd is the active PID 1
 	if out, _ := s.Run("test -d /run/systemd/system && echo yes"); strings.TrimSpace(out) == "yes" {
 		return "systemd"
@@ -97,7 +165,7 @@ func detectInitSystem(s *Session) string {
 	return ""
 }
 
-func serviceIsActive(s *Session, init, name string) (bool, error) {
+func serviceIsActive(s Remote, init, name string) (bool, error) {
 	var cmd string
 	q := shQuote(name)
 	switch init {
@@ -114,7 +182,7 @@ func serviceIsActive(s *Session, init, name string) (bool, error) {
 	return strings.TrimSpace(out) == "active", nil
 }
 
-func serviceIsEnabled(s *Session, name string) (bool, error) {
+func serviceIsEnabled(s Remote, name string) (bool, error) {
 	out, _ := s.Run("systemctl is-enabled " + shQuote(name) + " 2>/dev/null")
 	return strings.TrimSpace(out) == "enabled", nil
 }

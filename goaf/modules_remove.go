@@ -14,7 +14,10 @@ type RemoveModule struct {
 
 func (m RemoveModule) Name() string { return "remove" }
 
-func (m RemoveModule) Check(s *Session) (bool, error) {
+func (m RemoveModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("module 'remove' is not supported over WinRM (Linux package managers only)")
+	}
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
 		return false, fmt.Errorf("no known package manager found")
@@ -26,7 +29,7 @@ func (m RemoveModule) Check(s *Session) (bool, error) {
 	return installed, nil // change needed only if the package is installed
 }
 
-func (m RemoveModule) Apply(s *Session) (string, error) {
+func (m RemoveModule) Apply(s Remote) (string, error) {
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
 		return "", fmt.Errorf("no known package manager found")

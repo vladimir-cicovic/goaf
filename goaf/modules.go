@@ -19,7 +19,7 @@ type Result struct {
 // Differ is implemented by modules that can show what would change:
 // a unified diff of current remote state vs desired state.
 type Differ interface {
-	Diff(s *Session) (string, error)
+	Diff(s Remote) (string, error)
 }
 
 // Module defines the contract for all operations.
@@ -27,15 +27,15 @@ type Differ interface {
 // Apply executes the change and returns output.
 type Module interface {
 	Name() string
-	Check(s *Session) (bool, error)
-	Apply(s *Session) (string, error)
+	Check(s Remote) (bool, error)
+	Apply(s Remote) (string, error)
 }
 
 // RunModule executes a module: checks state, applies only if needed.
 // In checkMode, Apply is skipped and the result is marked as DryRun.
 // When diffMode is on and the module implements Differ, the result carries
 // a unified diff of old vs new content (computed before Apply).
-func RunModule(host string, s *Session, mod Module, checkMode bool) Result {
+func RunModule(host string, s Remote, mod Module, checkMode bool) Result {
 	needed, err := mod.Check(s)
 	if err != nil {
 		return Result{Host: host, Err: err}
@@ -69,10 +69,10 @@ type CommandModule struct {
 	Cmd string
 }
 
-func (m CommandModule) Name() string                   { return "command" }
-func (m CommandModule) Check(_ *Session) (bool, error) { return true, nil }
+func (m CommandModule) Name() string                 { return "command" }
+func (m CommandModule) Check(_ Remote) (bool, error) { return true, nil }
 
-func (m CommandModule) Apply(s *Session) (string, error) {
+func (m CommandModule) Apply(s Remote) (string, error) {
 	return s.Run(m.Cmd)
 }
 
@@ -85,7 +85,10 @@ type PackageModule struct {
 
 func (m PackageModule) Name() string { return "package" }
 
-func (m PackageModule) Check(s *Session) (bool, error) {
+func (m PackageModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("module 'install' is not supported over WinRM (Linux package managers only)")
+	}
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
 		return false, fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
@@ -97,7 +100,7 @@ func (m PackageModule) Check(s *Session) (bool, error) {
 	return !installed, nil
 }
 
-func (m PackageModule) Apply(s *Session) (string, error) {
+func (m PackageModule) Apply(s Remote) (string, error) {
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
 		return "", fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
@@ -125,7 +128,7 @@ func (m PackageModule) Apply(s *Session) (string, error) {
 	return s.Run(cmd)
 }
 
-func detectPkgMgr(s *Session) string {
+func detectPkgMgr(s Remote) string {
 	for _, mgr := range []string{"apt-get", "dnf", "yum", "apk", "slackpkg", "emerge", "pacman", "zypper"} {
 		// command -v is a POSIX shell builtin, always available (unlike which).
 		if out, _ := s.Run("command -v " + mgr + " 2>/dev/null"); strings.TrimSpace(out) != "" {
@@ -138,7 +141,7 @@ func detectPkgMgr(s *Session) string {
 	return ""
 }
 
-func isInstalled(s *Session, mgr, pkg string) (bool, error) {
+func isInstalled(s Remote, mgr, pkg string) (bool, error) {
 	var cmd string
 	q := shQuote(pkg)
 	switch mgr {

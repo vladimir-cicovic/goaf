@@ -108,7 +108,7 @@ func parseExtResult(out, wantKey string) (extResult, error) {
 }
 
 // upload copies the script to the remote host (overwrite each time).
-func (m ExternalModule) upload(s *Session) error {
+func (m ExternalModule) upload(s Remote) error {
 	if err := s.Upload(m.Bin, m.remotePath()); err != nil {
 		return fmt.Errorf("uploading external module %q: %w", m.ModName, err)
 	}
@@ -119,7 +119,7 @@ func (m ExternalModule) upload(s *Session) error {
 }
 
 // invoke runs the remote script with a verb and params as GOAF_P_* env.
-func (m ExternalModule) invoke(s *Session, verb, wantKey string) (extResult, error) {
+func (m ExternalModule) invoke(s Remote, verb, wantKey string) (extResult, error) {
 	if err := m.upload(s); err != nil {
 		return extResult{}, err
 	}
@@ -147,7 +147,10 @@ func (m ExternalModule) invoke(s *Session, verb, wantKey string) (extResult, err
 	return res, nil
 }
 
-func (m ExternalModule) Check(s *Session) (bool, error) {
+func (m ExternalModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("external modules are not supported over WinRM yet (POSIX shell only)")
+	}
 	res, err := m.invoke(s, "check", "needed")
 	if err != nil {
 		return false, err
@@ -155,7 +158,7 @@ func (m ExternalModule) Check(s *Session) (bool, error) {
 	return res.flag, nil
 }
 
-func (m ExternalModule) Apply(s *Session) (string, error) {
+func (m ExternalModule) Apply(s Remote) (string, error) {
 	res, err := m.invoke(s, "apply", "changed")
 	if err != nil {
 		return "", err

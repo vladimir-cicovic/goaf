@@ -2,9 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 )
@@ -19,7 +17,10 @@ type CopyModule struct {
 
 // backupRemote copies an existing remote file to a timestamped backup.
 // Returns the backup path, or "" when there was nothing to back up.
-func backupRemote(s *Session, dest string) (string, error) {
+func backupRemote(s Remote, dest string) (string, error) {
+	if isWinRM(s) {
+		return backupRemoteWin(dest, s)
+	}
 	out, err := s.Run("test -e " + shQuote(dest) + " && date +%Y%m%d%H%M%S")
 	if err != nil {
 		return "", nil // missing file — nothing to back up (not fatal)
@@ -35,19 +36,43 @@ func backupRemote(s *Session, dest string) (string, error) {
 	return bk, nil
 }
 
+// backupRemoteWin is backupRemote for Windows targets (PowerShell).
+func backupRemoteWin(dest string, s Remote) (string, error) {
+	exists, _ := s.Run("if (Test-Path " + psQuote(dest) + ") { 'yes' } else { 'no' }")
+	if strings.TrimSpace(exists) != "yes" {
+		return "", nil
+	}
+	ts, err := s.Run("Get-Date -Format 'yyyyMMddHHmmss'")
+	if err != nil {
+		return "", nil
+	}
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return "", nil
+	}
+	bk := dest + ".goafbak-" + ts
+	if _, err := s.Run("Copy-Item -Path " + psQuote(dest) + " -Destination " + psQuote(bk) + " -Force"); err != nil {
+		return "", err
+	}
+	return bk, nil
+}
+
 func (m CopyModule) Name() string { return "copy" }
 
-func (m CopyModule) Check(s *Session) (bool, error) {
-	localHash, err := localFileSHA256(m.Src)
+func (m CopyModule) Check(s Remote) (bool, error) {
+	want, err := os.ReadFile(m.Src)
 	if err != nil {
 		return false, fmt.Errorf("reading local file '%s': %w", m.Src, err)
 	}
-	out, _ := s.Run("sha256sum " + shQuote(m.Dest) + " 2>/dev/null | awk '{print $1}'")
-	remoteHash := strings.TrimSpace(out)
-	return localHash != remoteHash, nil
+	// Control-side compare: no remote hashing tools needed (works over WinRM).
+	old, rerr := s.ReadRemote(m.Dest)
+	if rerr != nil {
+		return true, nil // missing remote file → must copy
+	}
+	return sha256.Sum256(want) != sha256.Sum256(old), nil
 }
 
-func (m CopyModule) Apply(s *Session) (string, error) {
+func (m CopyModule) Apply(s Remote) (string, error) {
 	msg := ""
 	if m.Backup {
 		if bk, err := backupRemote(s, m.Dest); err != nil {
@@ -63,24 +88,11 @@ func (m CopyModule) Apply(s *Session) (string, error) {
 }
 
 // Diff shows the unified diff of current remote content vs the local file.
-func (m CopyModule) Diff(s *Session) (string, error) {
+func (m CopyModule) Diff(s Remote) (string, error) {
 	want, err := os.ReadFile(m.Src)
 	if err != nil {
 		return "", err
 	}
 	old, _ := s.ReadRemote(m.Dest) // missing file → treated as empty
 	return unifiedDiff(m.Dest, m.Dest, string(old), string(want), 3), nil
-}
-
-func localFileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

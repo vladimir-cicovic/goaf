@@ -58,17 +58,17 @@ type DebugModule struct {
 	Msg string
 }
 
-func (m DebugModule) Name() string                     { return "debug" }
-func (m DebugModule) Check(_ *Session) (bool, error)   { return false, nil }
-func (m DebugModule) Apply(_ *Session) (string, error) { return "", nil }
+func (m DebugModule) Name() string                   { return "debug" }
+func (m DebugModule) Check(_ Remote) (bool, error)   { return false, nil }
+func (m DebugModule) Apply(_ Remote) (string, error) { return "", nil }
 
 type SetFactModule struct {
 	Vars map[string]string
 }
 
-func (m SetFactModule) Name() string                     { return "set_fact" }
-func (m SetFactModule) Check(_ *Session) (bool, error)   { return false, nil }
-func (m SetFactModule) Apply(_ *Session) (string, error) { return "", nil }
+func (m SetFactModule) Name() string                   { return "set_fact" }
+func (m SetFactModule) Check(_ Remote) (bool, error)   { return false, nil }
+func (m SetFactModule) Apply(_ Remote) (string, error) { return "", nil }
 
 // ---------- meta pseudo-module ----------
 // Meta tasks (flush_handlers) are control-side: the runner intercepts them.
@@ -78,10 +78,10 @@ func (m SetFactModule) Apply(_ *Session) (string, error) { return "", nil }
 type MetaModule struct{}
 
 func (m MetaModule) Name() string { return "meta" }
-func (m MetaModule) Check(_ *Session) (bool, error) {
+func (m MetaModule) Check(_ Remote) (bool, error) {
 	return false, fmt.Errorf("meta tasks are playbook-only (flush_handlers)")
 }
-func (m MetaModule) Apply(_ *Session) (string, error) { return "", nil }
+func (m MetaModule) Apply(_ Remote) (string, error) { return "", nil }
 
 // ---------- user module ----------
 // Manages local user accounts (needs privilege: sudo is used internally,
@@ -96,10 +96,18 @@ type UserModule struct {
 
 func (m UserModule) Name() string { return "user" }
 
-func (m UserModule) Check(s *Session) (bool, error) {
+func (m UserModule) Check(s Remote) (bool, error) {
 	state := m.State
 	if state == "" {
 		state = "present"
+	}
+	if isWinRM(s) {
+		out, _ := s.Run("(Get-LocalUser -Name " + psQuote(m.Username) + " -ErrorAction SilentlyContinue) -ne $null")
+		exists := strings.TrimSpace(out) == "True"
+		if state == "absent" {
+			return exists, nil
+		}
+		return !exists, nil
 	}
 	out, _ := s.Run("id " + shQuote(m.Username) + " >/dev/null 2>&1 && echo yes || echo no")
 	exists := strings.TrimSpace(out) == "yes"
@@ -109,10 +117,13 @@ func (m UserModule) Check(s *Session) (bool, error) {
 	return !exists, nil
 }
 
-func (m UserModule) Apply(s *Session) (string, error) {
+func (m UserModule) Apply(s Remote) (string, error) {
 	state := m.State
 	if state == "" {
 		state = "present"
+	}
+	if isWinRM(s) {
+		return m.applyWin(s)
 	}
 	if state == "absent" {
 		if _, err := s.Run("sudo userdel -r " + shQuote(m.Username)); err != nil {
@@ -130,6 +141,33 @@ func (m UserModule) Apply(s *Session) (string, error) {
 	cmd += " " + shQuote(m.Username)
 	if _, err := s.Run(cmd); err != nil {
 		return "", fmt.Errorf("creating user '%s': %w", m.Username, err)
+	}
+	return "created user: " + m.Username, nil
+}
+
+// applyWin manages local Windows users (shell/groups are Unix-only, ignored).
+func (m UserModule) applyWin(s Remote) (string, error) {
+	state := m.State
+	if state == "" {
+		state = "present"
+	}
+	q := psQuote(m.Username)
+	if state == "absent" {
+		if _, err := s.Run("Remove-LocalUser -Name " + q); err != nil {
+			return "", fmt.Errorf("deleting user '%s': %w", m.Username, err)
+		}
+		return "deleted user: " + m.Username, nil
+	}
+	cmd := "New-LocalUser -Name " + q + " -NoPassword"
+	if _, err := s.Run(cmd); err != nil {
+		return "", fmt.Errorf("creating user '%s': %w", m.Username, err)
+	}
+	for _, g := range strings.Split(m.Groups, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			if _, err := s.Run("Add-LocalGroupMember -Group " + psQuote(g) + " -Member " + q); err != nil {
+				return "", fmt.Errorf("adding '%s' to group '%s': %w", m.Username, g, err)
+			}
+		}
 	}
 	return "created user: " + m.Username, nil
 }
@@ -210,13 +248,13 @@ func (m LineinfileModule) matches(l string) bool {
 	return l == m.Line
 }
 
-func (m LineinfileModule) Check(s *Session) (bool, error) {
+func (m LineinfileModule) Check(s Remote) (bool, error) {
 	remote, _ := s.ReadRemote(m.Path) // missing file → treated as empty
 	_, needed, err := m.desired(string(remote))
 	return needed, err
 }
 
-func (m LineinfileModule) Apply(s *Session) (string, error) {
+func (m LineinfileModule) Apply(s Remote) (string, error) {
 	remote, _ := s.ReadRemote(m.Path)
 	want, needed, err := m.desired(string(remote))
 	if err != nil {
@@ -232,7 +270,7 @@ func (m LineinfileModule) Apply(s *Session) (string, error) {
 }
 
 // Diff shows the unified diff of current vs desired file content.
-func (m LineinfileModule) Diff(s *Session) (string, error) {
+func (m LineinfileModule) Diff(s Remote) (string, error) {
 	remote, _ := s.ReadRemote(m.Path)
 	want, _, err := m.desired(string(remote))
 	if err != nil {
@@ -252,9 +290,14 @@ type ScriptModule struct {
 
 func (m ScriptModule) Name() string { return "script" }
 
-func (m ScriptModule) Check(_ *Session) (bool, error) { return true, nil }
+func (m ScriptModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("module 'script' is not supported over WinRM (POSIX shell only)")
+	}
+	return true, nil
+}
 
-func (m ScriptModule) Apply(s *Session) (string, error) {
+func (m ScriptModule) Apply(s Remote) (string, error) {
 	remote := "/tmp/.goaf-script-" + fmt.Sprintf("%d", time.Now().UnixNano()) + ".sh"
 	if err := s.Upload(m.Src, remote); err != nil {
 		return "", err
@@ -288,7 +331,7 @@ type FetchModule struct {
 
 func (m FetchModule) Name() string { return "fetch" }
 
-func (m FetchModule) Check(s *Session) (bool, error) {
+func (m FetchModule) Check(s Remote) (bool, error) {
 	local, err := m.localPath()
 	if err != nil {
 		return false, err
@@ -304,7 +347,7 @@ func (m FetchModule) Check(s *Session) (bool, error) {
 	return string(remote) != string(want), nil
 }
 
-func (m FetchModule) Apply(s *Session) (string, error) {
+func (m FetchModule) Apply(s Remote) (string, error) {
 	local, err := m.localPath()
 	if err != nil {
 		return "", err
@@ -348,7 +391,7 @@ type AuthorizedKeyModule struct {
 
 func (m AuthorizedKeyModule) Name() string { return "authorized_key" }
 
-func (m AuthorizedKeyModule) homeDir(s *Session) (string, error) {
+func (m AuthorizedKeyModule) homeDir(s Remote) (string, error) {
 	out, err := s.Run("getent passwd " + shQuote(m.User) + " | cut -d: -f6")
 	if err != nil {
 		return "", fmt.Errorf("resolving home of user '%s': %w", m.User, err)
@@ -360,7 +403,10 @@ func (m AuthorizedKeyModule) homeDir(s *Session) (string, error) {
 	return home, nil
 }
 
-func (m AuthorizedKeyModule) Check(s *Session) (bool, error) {
+func (m AuthorizedKeyModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("module 'authorized_key' is not supported over WinRM (Linux SSH keys only)")
+	}
 	home, err := m.homeDir(s)
 	if err != nil {
 		return false, err
@@ -377,7 +423,7 @@ func (m AuthorizedKeyModule) Check(s *Session) (bool, error) {
 	return !present, nil
 }
 
-func (m AuthorizedKeyModule) Apply(s *Session) (string, error) {
+func (m AuthorizedKeyModule) Apply(s Remote) (string, error) {
 	home, err := m.homeDir(s)
 	if err != nil {
 		return "", err
@@ -428,21 +474,40 @@ func (m RebootModule) timeout() int {
 	return m.Timeout
 }
 
-func (m RebootModule) Check(_ *Session) (bool, error) { return true, nil }
+func (m RebootModule) Check(_ Remote) (bool, error) { return true, nil }
 
-func (m RebootModule) Apply(s *Session) (string, error) {
+func (m RebootModule) Apply(s Remote) (string, error) {
+	if w, ok := s.(*WinRMSession); ok {
+		return m.applyWin(w)
+	}
+	ss, ok := s.(*Session)
+	if !ok {
+		return "", fmt.Errorf("reboot: unsupported session type")
+	}
 	// Fire-and-forget: the connection will drop. Needs privilege like
 	// the package modules (sudo is embedded, become wraps harmlessly).
 	oldID, _ := s.Run("cat /proc/sys/kernel/random/boot_id 2>/dev/null")
 	oldID = strings.TrimSpace(oldID)
 	_, _ = s.Run("sudo -n sh -c 'sleep 2; reboot' >/dev/null 2>&1 & echo rebooting")
-	if err := waitForReboot(s, m.timeout(), oldID); err != nil {
+	if err := waitForReboot(ss, m.timeout(), oldID); err != nil {
 		return "", err
 	}
 	if m.Msg != "" {
 		return "rebooted: " + m.Msg, nil
 	}
 	return "rebooted, SSH reachable again", nil
+}
+
+// applyWin reboots a Windows host and waits for WinRM to return.
+func (m RebootModule) applyWin(s *WinRMSession) (string, error) {
+	_, _ = s.Run("Restart-Computer -Force")
+	if err := waitForRebootWinRM(s, m.timeout()); err != nil {
+		return "", err
+	}
+	if m.Msg != "" {
+		return "rebooted: " + m.Msg, nil
+	}
+	return "rebooted, WinRM reachable again", nil
 }
 
 // ---------- upgrade module ----------
@@ -453,9 +518,14 @@ type UpgradeModule struct{}
 
 func (m UpgradeModule) Name() string { return "upgrade" }
 
-func (m UpgradeModule) Check(_ *Session) (bool, error) { return true, nil }
+func (m UpgradeModule) Check(s Remote) (bool, error) {
+	if isWinRM(s) {
+		return false, fmt.Errorf("module 'upgrade' is not supported over WinRM (Linux package managers only)")
+	}
+	return true, nil
+}
 
-func (m UpgradeModule) Apply(s *Session) (string, error) {
+func (m UpgradeModule) Apply(s Remote) (string, error) {
 	mgr := detectPkgMgr(s)
 	if mgr == "" {
 		return "", fmt.Errorf("no known package manager found (apt/dnf/yum/apk/slackpkg/emerge/pacman/zypper)")
