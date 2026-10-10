@@ -130,6 +130,36 @@ func ListHistory() ([]RunSummary, error) {
 	return out, nil
 }
 
+// loadHistoryLines replays a recorded run: parses its NDJSON and formats
+// each event exactly like a live run (host status table untouched).
+func loadHistoryLines(id string) ([]string, error) {
+	dir, err := historyDir()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, id+".ndjson"))
+	if err != nil {
+		return nil, err
+	}
+	out := []string{"REPLAY " + id + "  (Esc to exit)", ""}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		typ, _ := m["type"].(string)
+		if typ == "" {
+			continue
+		}
+		out = append(out, formatEvent(eventMsg{eventType: typ, data: m})...)
+	}
+	return out, nil
+}
+
 // runMode guesses a short mode label from goaf args for the history id.
 func runMode(args []string) string {
 	for i, a := range args {

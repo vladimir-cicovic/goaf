@@ -170,6 +170,13 @@ type Model struct {
 	searchQuery   string
 	searchMatches []int // indices into current displayLines
 	searchIdx     int   // current match position in searchMatches
+
+	// History replay (monitor panel)
+	histMode   bool         // browsing past runs list
+	histRuns   []RunSummary // newest first
+	histCursor int
+	histReplay string   // run id being replayed ("" = live)
+	histBackup []string // live runLines swapped out during replay
 }
 
 // New creates the initial TUI model. If invPath is non-empty it is loaded as
@@ -394,6 +401,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			if !m.running {
+				m.restoreReplay()
 				return m.startRunCmd()
 			}
 			return m, nil
@@ -868,7 +876,55 @@ func (m *Model) ensureHost(host string) {
 	}
 }
 
+// restoreReplay returns the monitor to the live log after a replay.
+func (m *Model) restoreReplay() {
+	if m.histReplay == "" {
+		return
+	}
+	m.runLines = m.histBackup
+	m.histBackup = nil
+	m.histReplay = ""
+	m.monScroll = 0
+	m.searchQuery = ""
+	m.searchMatches = nil
+	m.searchIdx = 0
+}
+
 func (m Model) handleMonitorKey(key string) Model {
+	// History list navigation.
+	if m.histMode {
+		switch key {
+		case "up", "k":
+			if m.histCursor > 0 {
+				m.histCursor--
+			}
+		case "down", "j":
+			if m.histCursor < len(m.histRuns)-1 {
+				m.histCursor++
+			}
+		case "enter":
+			if m.histCursor < len(m.histRuns) {
+				if lines, err := loadHistoryLines(m.histRuns[m.histCursor].ID); err == nil {
+					m.histBackup = m.runLines
+					m.runLines = lines
+					m.histReplay = m.histRuns[m.histCursor].ID
+					m.histMode = false
+					m.monScroll = 0
+					m.searchQuery = ""
+					m.searchMatches = nil
+					m.searchIdx = 0
+				}
+			}
+		case "esc":
+			m.histMode = false
+		}
+		return m
+	}
+	// Exit replay back to live log.
+	if m.histReplay != "" && key == "esc" {
+		m.restoreReplay()
+		return m
+	}
 	total := len(m.runLines)
 	switch key {
 	case "up", "k":
@@ -909,6 +965,14 @@ func (m Model) handleMonitorKey(key string) Model {
 		}
 	case "s":
 		m.saveMsg = m.saveLog()
+	case "H":
+		if !m.running && m.histReplay == "" {
+			if runs, err := ListHistory(); err == nil {
+				m.histRuns = runs
+				m.histCursor = 0
+				m.histMode = len(runs) > 0
+			}
+		}
 	}
 	return m
 }
@@ -1055,6 +1119,11 @@ func (m Model) startRunCmd() (Model, tea.Cmd) {
 	m.cancelling = false
 	m.runCmd = cmd
 	m.runErr = ""
+	m.histMode = false
+	m.histRuns = nil
+	m.histCursor = 0
+	m.histReplay = ""
+	m.histBackup = nil
 	m.runLines = []string{fmt.Sprintf("$ goaf %s", strings.Join(args, " "))}
 	m.eventCh = ch
 	m.monScroll = 0
@@ -1277,6 +1346,7 @@ func (m Model) renderStatusBar() string {
 				styleKey.Render("/") + " search",
 				styleKey.Render("+/-") + " resize(" + split + ")",
 				styleKey.Render("s") + " save",
+				styleKey.Render("H") + " history",
 				styleKey.Render("r") + " run",
 				styleKey.Render("1-4") + " jump",
 				styleKey.Render("q") + " quit",
@@ -1572,6 +1642,22 @@ func (m Model) contentRunConfig(maxLines int) string {
 }
 
 func (m Model) contentMonitor(maxLines int) string {
+	// History browser replaces the log while active.
+	if m.histMode {
+		lines := []string{styleDim.Render("Run history  (Enter = replay, Esc = back)"), ""}
+		for i, r := range m.histRuns {
+			line := fmt.Sprintf("%-16s %-10s ok=%-3d chg=%-3d fail=%-3d  %s",
+				strings.Replace(r.Time, "T", " ", 1), r.Mode, r.Ok, r.Changed, r.Failed, r.ID)
+			if i == m.histCursor {
+				line = styleCursor.Render(line)
+			}
+			lines = append(lines, line)
+		}
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+		}
+		return strings.Join(lines, "\n")
+	}
 	if len(m.runLines) == 0 && len(m.hostOrder) == 0 {
 		lines := []string{styleDim.Render("No active run.")}
 		if m.runErr != "" {
