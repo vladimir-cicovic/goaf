@@ -98,7 +98,7 @@ const (
 type taskMode int
 
 const (
-	taskAdhoc    taskMode = iota
+	taskAdhoc taskMode = iota
 	taskPlaybook
 	taskModeCount
 )
@@ -1352,7 +1352,7 @@ func (m Model) contentInventory(innerW, maxLines int) string {
 		indent := strings.Repeat("  ", item.indent)
 		check := "[ ]"
 		if item.selected {
-			check = styleOn.Render("[✓]")
+			check = styleOn.Render("[×]")
 		}
 
 		var label string
