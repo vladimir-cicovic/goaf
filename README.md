@@ -29,6 +29,10 @@ Ad-hoc command on a group:
 
 ![goaf ad-hoc uptime](screenshoots/single-uptime.png)
 
+Parallel run on multiple hosts:
+
+![goaf parallel run](screenshoots/paralel-run.jpg)
+
 Condition check:
 
 ![goaf condition check](screenshoots/cli-condition-check.jpeg)
