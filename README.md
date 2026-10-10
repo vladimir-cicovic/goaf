@@ -41,10 +41,6 @@ goaf-tui running a playbook:
 
 ![goaf-tui playbook](screenshoots/goaf-tui-playbook.png)
 
-Parallel run on multiple hosts:
-
-![goaf parallel run](screenshoots/paralel-run.jpg)
-
 ## Changelog
 
 ### ver-0.0.3 - fixes, verified on docker (debian / openSUSE / alpine / arch / fedora)
