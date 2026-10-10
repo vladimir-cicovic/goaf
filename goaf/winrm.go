@@ -50,13 +50,15 @@ func winParent(p string) string {
 }
 
 // ConnectWinRM dials a Windows host (validates with a no-op probe).
+// TLS uses InsecureSkipVerify: lab hosts carry self-signed certs, so the
+// chain is not verified (traffic itself is still TLS-encrypted).
 func ConnectWinRM(h Host, password string) (*WinRMSession, error) {
 	label := hostLabel(h)
 	port := h.Port
 	if port == 0 {
 		port = 5985
 	}
-	endpoint := winrm.NewEndpoint(h.Addr, port, false, false, nil, nil, nil, 0)
+	endpoint := winrm.NewEndpoint(h.Addr, port, h.WinRMHTTPS, true, nil, nil, nil, 0)
 	params := winrm.NewParameters("PT60S", "en-US", 153600)
 	params.TransportDecorator = func() winrm.Transporter { return &winrm.ClientNTLM{} }
 	client, err := winrm.NewClientWithParameters(endpoint, h.User, password, params)
@@ -200,17 +202,27 @@ func isWinRM(s Remote) bool {
 	return ok
 }
 
-// waitForRebootWinRM polls a WinRM host until it answers again.
-func waitForRebootWinRM(s *WinRMSession, timeoutSec int) error {
+// winBootTime returns LastBootUpTime (round-trip comparable string).
+func winBootTime(s *WinRMSession) string {
+	out, err := s.Run("(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// waitForRebootWinRM polls until LastBootUpTime differs from oldBoot
+// (proves the reboot happened), or the timeout expires.
+func waitForRebootWinRM(s *WinRMSession, timeoutSec int, oldBoot string) error {
 	if timeoutSec <= 0 {
 		timeoutSec = 300
 	}
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := s.Run("$env:COMPUTERNAME"); err == nil {
+		if boot := winBootTime(s); boot != "" && boot != oldBoot {
 			return nil
 		}
 		time.Sleep(5 * time.Second)
 	}
-	return fmt.Errorf("WinRM did not return within %ds on %s", timeoutSec, s.Host)
+	return fmt.Errorf("WinRM did not return with a new boot within %ds on %s", timeoutSec, s.Host)
 }

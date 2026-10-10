@@ -119,7 +119,11 @@ func (m ExternalModule) upload(s Remote) error {
 }
 
 // invoke runs the remote script with a verb and params as GOAF_P_* env.
+// On WinRM only .ps1 scripts run (POSIX shell scripts are rejected).
 func (m ExternalModule) invoke(s Remote, verb, wantKey string) (extResult, error) {
+	if w, ok := s.(*WinRMSession); ok {
+		return m.invokeWinRM(w, verb, wantKey)
+	}
 	if err := m.upload(s); err != nil {
 		return extResult{}, err
 	}
@@ -147,10 +151,51 @@ func (m ExternalModule) invoke(s Remote, verb, wantKey string) (extResult, error
 	return res, nil
 }
 
-func (m ExternalModule) Check(s Remote) (bool, error) {
-	if isWinRM(s) {
-		return false, fmt.Errorf("external modules are not supported over WinRM yet (POSIX shell only)")
+// invokeWinRM runs a .ps1 external module: params become $env:GOAF_P_*
+// in one PowerShell line, then the script with the verb argument.
+// Bypass is needed: script files are blocked by execution policy.
+func (m ExternalModule) invokeWinRM(s *WinRMSession, verb, wantKey string) (extResult, error) {
+	if !strings.HasSuffix(strings.ToLower(m.Bin), ".ps1") {
+		return extResult{}, fmt.Errorf("external module %q: only .ps1 scripts run over WinRM", m.ModName)
 	}
+	data, err := os.ReadFile(m.Bin)
+	if err != nil {
+		return extResult{}, fmt.Errorf("reading external module %q: %w", m.ModName, err)
+	}
+	tmpDir, _ := s.Run("$env:TEMP")
+	tmpDir = strings.TrimSpace(tmpDir)
+	if tmpDir == "" {
+		tmpDir = `C:\Windows\Temp`
+	}
+	remote := strings.TrimRight(tmpDir, `/\`) + "\\.goaf-ext-" + m.ModName + ".ps1"
+	if err := s.UploadContent(data, remote); err != nil {
+		return extResult{}, err
+	}
+	keys := make([]string, 0, len(m.Params))
+	for k := range m.Params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString("$env:GOAF_P_" + k + "=" + psQuote(m.Params[k]) + "; ")
+	}
+	b.WriteString("powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + psQuote(remote) + " " + psQuote(verb))
+	out, err := s.Run(b.String())
+	if err != nil {
+		return extResult{}, fmt.Errorf("external module %q %s: %w: %s", m.ModName, verb, err, strings.TrimSpace(out))
+	}
+	res, perr := parseExtResult(out, wantKey)
+	if perr != nil {
+		return extResult{}, fmt.Errorf("external module %q %s: %w (output: %q)", m.ModName, verb, perr, strings.TrimSpace(out))
+	}
+	if res.errMsg != "" {
+		return extResult{}, fmt.Errorf("external module %q: %s", m.ModName, res.errMsg)
+	}
+	return res, nil
+}
+
+func (m ExternalModule) Check(s Remote) (bool, error) {
 	res, err := m.invoke(s, "check", "needed")
 	if err != nil {
 		return false, err
