@@ -975,6 +975,55 @@ In the Monitor panel press `H` to browse past runs, Enter to replay one
 (rendered exactly like live, including diffs), Esc to return to live.
 `goaf-tui --history` lists recordings without the UI.
 
+## Windows hosts - WinRM
+
+Linux hosts use SSH; Windows hosts use WinRM (HTTP + NTLM). Mark hosts
+with `connection: winrm` (default port 5985) and give a password
+(plain, `$GOAFVAULT`, `GOAF_WINRM_PASSWORD` env or `--ask-winrm-pass`).
+
+```yaml
+groups:
+  win:
+    hosts: [192.168.1.30]
+hosts:
+  192.168.1.30:
+    user: admin
+    connection: winrm
+    password: s3cret
+```
+```bash
+  goaf -i inv.yml -t win command "hostname; whoami"
+  goaf --ask-winrm-pass -i inv.yml -t win command "Get-Service WinRM"
+```
+
+Guest preparation — run `examples/windows/Enable-GoafWinRM.ps1` ELEVATED
+(right-click PowerShell -> Run as administrator) on the Windows host:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Enable-GoafWinRM.ps1
+```
+
+It enables the WinRM service + HTTP listener (port 5985, skipping the
+Public-profile check that blocks quick config), turns on Basic auth,
+enables the firewall rules, and sets `LocalAccountTokenFilterPolicy=1`
+so non-builtin local admins can log on remotely (without it WinRM
+returns HTTP 401 even with the right password). Equivalent manual steps:
+
+```powershell
+Enable-PSRemoting -Force -SkipNetworkProfileCheck
+Set-Item WSMan:\localhost\Service\Auth\Basic $true
+Enable-NetFirewallRule -DisplayGroup "Windows Remote Management"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name LocalAccountTokenFilterPolicy -Value 1 -Type DWord
+Restart-Service WinRM
+```
+
+Supported over WinRM: `command` (PowerShell), `copy`, `template`,
+`file` (type/state only), `service` (`started|stopped|restarted`,
+`enabled`), `user`, `setup` (facts), `lineinfile`, `fetch`, `debug`,
+`set_fact`. Package managers, `authorized_key`, `script`, `upgrade`
+and external modules are Linux-only and fail with a clear error.
+`become` is accepted but ignored on Windows.
+
 ## Output - values printed at play end
 
 `output:` values render with the first host's vars (play, group, host,

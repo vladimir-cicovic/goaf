@@ -1,0 +1,27 @@
+# Windows demo: install an app with winget on WinRM hosts (group "win").
+# Uses command + register/when for idempotency (no winget module yet).
+- name: Windows install demo
+  hosts: win
+  tasks:
+    - name: Check winget
+      command: "winget --version"
+      register: winget_ver
+
+    - name: Show winget
+      debug: {msg: "winget {{.winget_ver}}"}
+
+    - name: Check 7-Zip
+      command: "(winget list --id 7zip.7zip --accept-source-agreements | Select-String '7zip.7zip') -ne $null"
+      register: has7zip
+
+    - name: Install 7-Zip
+      command: "winget install --id 7zip.7zip --silent --accept-package-agreements --accept-source-agreements --scope machine"
+      when: '{{ne .has7zip "True"}}'
+
+    - name: Verify 7-Zip
+      command: "Test-Path 'C:\\Program Files\\7-Zip\\7z.exe'"
+      register: verify7zip
+      failed_when: '{{ne .result "True"}}'
+
+    - name: Report
+      debug: {msg: "7-Zip installed: {{.verify7zip}}"}
