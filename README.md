@@ -1020,4 +1020,99 @@ script file; its stdout must be inventory YAML (or JSON).
 ```
 `examples/inventory/docker-inventory.sh` builds a group from local docker
 containers publishing SSH (port 22); `GOAF_USER`/`GOAF_HOST` tune the output.
+
+## Retries - until it works
+
+`retries` adds attempts after the first (total = 1 + retries), `delay`
+waits seconds between them, `until` is a template over vars+facts+result
+that decides success.
+
+```yaml
+    - name: Wait for app port
+      command: "curl -sf http://localhost:8080/health"
+      retries: 10
+      delay: 3
+```
+
+## Abort rules - stop a bad rollout
+
+`any_errors_fatal: true` aborts the whole run on the first unignored
+failure; `max_fail_percentage: N` aborts when more than N% of batch
+hosts failed.
+
+```yaml
+- name: Rolling deploy
+  hosts: web
+  serial: 2
+  max_fail_percentage: 50
+  tasks:
+    - name: Deploy
+      copy: {src: ./app.bin, dest: /opt/app/app.bin}
+```
+
+## Flush handlers - run them mid-play
+
+The `meta: flush_handlers` task runs notified handlers immediately
+instead of waiting for the end of the section.
+
+```yaml
+    - name: Deploy config
+      template: {src: ./app.conf.tmpl, dest: /etc/app.conf}
+      notify: Restart app
+    - meta: flush_handlers
+    - name: Health check
+      command: "curl -sf http://localhost:8080/health"
+```
+
+## Facts cache - skip repeated gathering
+
+Gathered facts are cached in `~/.goaf/facts.json` for an hour by default.
+
+```bash
+  goaf --facts-ttl=3600 -i inv.yml run site.yml   # explicit TTL
+  goaf --facts-ttl=0 -i inv.yml run site.yml      # disable cache
+  goaf --flush-cache -i inv.yml run site.yml      # refresh cache
+```
+
+## Roles - reusable task bundles
+
+A role is a folder with `tasks/main.yml` (required), optional
+`handlers/main.yml`, `vars/main.yml` (win over play vars),
+`defaults/main.yml` (lose to everything), `files/` and `templates/`.
+
+```
+roles/webapp/
+  tasks/main.yml       # tasks run before play tasks, prefixed "webapp : "
+  handlers/main.yml    # join play handlers
+  vars/main.yml        # role variables
+  defaults/main.yml    # fallback variables
+  files/app.txt        # copy/script src lookup
+  templates/app.conf.tmpl
+```
+
+```yaml
+- name: Deploy web
+  hosts: web
+  vars:
+    role_port: "7070"     # loses to the role's vars/main.yml
+  roles:
+    - webapp
+    - {role: db, db_name: shop}   # invocation vars win over role vars
+  tasks:
+    - name: Rest of deploy
+      command: "echo done"
+```
+```bash
+  goaf -i inv.yml --roles-path=./roles run site.yml
+```
+
+## Include tasks - split files
+
+Splice an external task file (also inside roles; paths resolve relative
+to the including file, then the working directory).
+
+```yaml
+    - name: Common setup
+      include_tasks: common-tasks.yml
+```
   

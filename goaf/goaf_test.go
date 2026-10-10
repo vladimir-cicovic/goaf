@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -184,7 +186,7 @@ func TestParseTasks(t *testing.T) {
   handlers:
     - name: H
       command: echo hi
-`))
+`), "", "roles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +232,7 @@ func TestParseBlock(t *testing.T) {
   post_tasks:
     - name: Post
       command: uptime
-`))
+`), "", "roles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +264,7 @@ func TestParseRunOnceDelegate(t *testing.T) {
       run_once: true
       delegate_to: localhost
       tags: always
-`))
+`), "", "roles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +287,7 @@ func TestParseDebugSetFact(t *testing.T) {
       debug: {msg: "hi {{.x}}"}
     - name: S1
       set_fact: {a: "1", b: "2"}
-`))
+`), "", "roles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +330,96 @@ func TestIsInventoryFile(t *testing.T) {
 		if isInventoryFile(p) {
 			t.Errorf("%q should not be inventory file", p)
 		}
+	}
+}
+
+func TestParseRetriesUntilMeta(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  max_fail_percentage: 30
+  any_errors_fatal: true
+  tasks:
+    - name: Retry me
+      command: uptime
+      retries: 5
+      delay: 3
+      until: '{{eq .result "ok"}}'
+    - name: Flush now
+      meta: flush_handlers
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if p.MaxFailPct == nil || *p.MaxFailPct != 30 || !p.AnyErrorsFatal {
+		t.Errorf("bad play abort keys: %+v", p)
+	}
+	rt := p.Tasks[0]
+	if rt.Retries != 5 || rt.Delay != 3 || rt.Until == "" {
+		t.Errorf("bad retry parse: %+v", rt)
+	}
+	if p.Tasks[1].Module != "meta" {
+		t.Errorf("bad meta parse: %+v", p.Tasks[1])
+	}
+}
+
+func TestExpandRoles(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("roles/web/tasks/main.yml", "- name: Deploy\n  command: uptime\n")
+	mk("roles/web/handlers/main.yml", "- name: Restart\n  command: uptime\n")
+	mk("roles/web/vars/main.yml", "port: \"9090\"\n")
+	mk("roles/web/defaults/main.yml", "port: \"80\"\nfb: dflt\n")
+	mk("roles/web/files/app.txt", "x")
+	mk("site.yml", "- name: p\n  hosts: all\n  vars: {port: \"7070\"}\n  roles:\n    - web\n")
+
+	data, err := os.ReadFile(filepath.Join(dir, "site.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes(data, dir, filepath.Join(dir, "roles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if len(p.Tasks) != 1 || len(p.Handlers) != 1 {
+		t.Fatalf("bad role expansion: %+v", p)
+	}
+	if !strings.HasPrefix(p.Tasks[0].Name, "web : ") {
+		t.Errorf("role prefix missing: %q", p.Tasks[0].Name)
+	}
+	if p.Tasks[0].RoleDir == "" {
+		t.Error("RoleDir not set")
+	}
+	if p.Vars["port"] != "9090" || p.Vars["fb"] != "dflt" {
+		t.Errorf("bad var merge: %v", p.Vars)
+	}
+}
+
+func TestIncludeTasks(t *testing.T) {
+	dir := t.TempDir()
+	inc := filepath.Join(dir, "common.yml")
+	if err := os.WriteFile(inc, []byte("- name: Inc\n  command: uptime\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  tasks:\n    - name: Wrapper\n      include_tasks: common.yml\n"), dir, "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plays[0].Tasks) != 1 || plays[0].Tasks[0].Module != "block" {
+		t.Fatalf("include not spliced as block: %+v", plays[0].Tasks)
+	}
+	if len(plays[0].Tasks[0].Block) != 1 || plays[0].Tasks[0].Block[0].Name != "Inc" {
+		t.Errorf("bad include content: %+v", plays[0].Tasks[0])
 	}
 }
 

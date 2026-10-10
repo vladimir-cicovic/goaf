@@ -49,6 +49,8 @@ func main() {
 	vaultPassFileFlag := ""
 	askVaultPass := false
 	savePlan := ""
+	factsTTLStr := ""
+	flushCache := false
 	filtered := os.Args[:1]
 	for _, a := range os.Args[1:] {
 		name, val, hasVal := splitFlag(a)
@@ -88,6 +90,16 @@ func main() {
 		case "save-plan":
 			if hasVal {
 				savePlan = val
+			}
+		case "facts-ttl":
+			if hasVal {
+				factsTTLStr = val
+			}
+		case "flush-cache":
+			flushCache = true
+		case "roles-path":
+			if hasVal {
+				rolesPath = val
 			}
 		default:
 			filtered = append(filtered, a)
@@ -195,6 +207,8 @@ func main() {
 			SkipTags:    skipTags,
 			Limit:       limitStr,
 			Serial:      parseSerial(serialStr),
+			FactsTTL:    parseFactsTTL(factsTTLStr),
+			FlushCache:  flushCache,
 		}
 		if savePlan != "" {
 			if err := savePlanFile(savePlan, args[1], *invPath, opts, becomeMode); err != nil {
@@ -441,6 +455,19 @@ func parseSerial(s string) int {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || n < 0 {
 		fmt.Fprintf(os.Stderr, "invalid --serial value %q (want a non-negative integer)\n", s)
+		os.Exit(1)
+	}
+	return n
+}
+
+// parseFactsTTL parses --facts-ttl=N (seconds, default 3600).
+func parseFactsTTL(s string) int {
+	if s == "" {
+		return 3600
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "invalid --facts-ttl value %q (want seconds >= 0, 0 disables cache)\n", s)
 		os.Exit(1)
 	}
 	return n
@@ -707,7 +734,7 @@ func validateTaskList(playName string, tasks []PlayTask, checkVars map[string]st
 			failed++
 			continue
 		}
-		for _, expr := range []string{t.When, t.FailedWhen, t.ChangedWhen} {
+		for _, expr := range []string{t.When, t.FailedWhen, t.ChangedWhen, t.Until} {
 			if expr != "" {
 				if _, err := evalWhen(expr, checkVars); err != nil {
 					fmt.Printf("PLAY [%s] task %q: bad condition: %v\n", playName, t.Name, err)
@@ -750,6 +777,8 @@ func usage() {
 	fmt.Println("  --serial=<n>    max hosts per batch — rolling update (playbook mode)")
 	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
+	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
+	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("\nModules (ad-hoc):")
 	fmt.Println("  command  \"<shell command>\"")
 	fmt.Println("  install  <package>")
@@ -774,7 +803,8 @@ func usage() {
 	fmt.Println("  goaf -json  -i inventory.yml run site.yml   # NDJSON output")
 	fmt.Println("\nPlaybook task keys: when, failed_when, changed_when, ignore_errors,")
 	fmt.Println("  register, loop/with_items, notify, tags, run_once, delegate_to,")
-	fmt.Println("  block/rescue/always (+ pre_tasks/post_tasks, top-level handlers:)")
+	fmt.Println("  block/rescue/always, retries/delay/until, meta (+ pre_tasks/post_tasks,")
+	fmt.Println("  max_fail_percentage/any_errors_fatal, top-level handlers:)")
 	fmt.Println("\nExamples:")
 	fmt.Println("  goaf -t web command \"uptime\"")
 	fmt.Println("  goaf -t web install nginx")
