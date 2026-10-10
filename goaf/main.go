@@ -195,9 +195,57 @@ func main() {
 		return
 	}
 
-	// drift: re-check recorded state against live hosts
+	// drift: re-check recorded state against live hosts (--fix re-applies)
 	if args[0] == "drift" {
-		os.Exit(runDrift(*invPath, becomeMode, *parallel))
+		fix := false
+		for _, a := range args[1:] {
+			if a == "--fix" {
+				fix = true
+			}
+		}
+		os.Exit(runDrift(*invPath, becomeMode, *parallel, fix))
+	}
+
+	// state: list or forget recorded entries
+	if args[0] == "state" {
+		if len(args) < 2 || (args[1] != "list" && args[1] != "forget") {
+			fmt.Fprintln(os.Stderr, "usage: goaf state list [host] | goaf state forget <host|fingerprint-prefix>")
+			os.Exit(1)
+		}
+		entries := loadState()
+		if args[1] == "list" {
+			filter := ""
+			if len(args) > 2 {
+				filter = args[2]
+			}
+			n := 0
+			for _, e := range entries {
+				if filter != "" && e.Host != filter {
+					continue
+				}
+				fmt.Printf("%s  %-24s %-12s %-8s %s  %s\n",
+					e.Time, e.Host, e.Module, e.Fingerprint, e.Play, describeEntry(e))
+				n++
+			}
+			if n == 0 {
+				if filter != "" {
+					fmt.Printf("no recorded state for host %q\n", filter)
+				} else {
+					fmt.Println("no recorded state yet — run something first")
+				}
+			}
+			return
+		}
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: goaf state forget <host|fingerprint-prefix>")
+			os.Exit(1)
+		}
+		if n := forgetState(args[2]); n > 0 {
+			fmt.Printf("forgot %d %s\n", n, map[bool]string{true: "entry", false: "entries"}[n == 1])
+		} else {
+			fmt.Printf("nothing matched %q\n", args[2])
+		}
+		return
 	}
 
 	// audit: list recorded runs (newest last)
@@ -947,6 +995,10 @@ func usage() {
 	fmt.Println("  goaf -i inventory.yml run <playbook.yml> --save-plan=<plan.json>")
 	fmt.Println("  goaf apply <plan.json> [--check]")
 	fmt.Println("  goaf vault encrypt|decrypt [value|-]")
+	fmt.Println("  goaf -i inventory.yml drift [--fix]")
+	fmt.Println("  goaf state list [host]")
+	fmt.Println("  goaf state forget <host|fingerprint-prefix>")
+	fmt.Println("  goaf audit [N]")
 	fmt.Println("\nFlags:")
 	fmt.Println("  -i <path>       inventory file (default: inventory.yml);")
 	fmt.Println("                  exec:<command> or an executable script = dynamic inventory")

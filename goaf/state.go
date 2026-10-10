@@ -90,12 +90,40 @@ func recordState(h Host, play, module string, params map[string]string, output s
 	if len(kept) > maxStateEntries {
 		kept = kept[len(kept)-maxStateEntries:]
 	}
+	saveStateEntries(kept)
+}
+
+// saveStateEntries persists entries (best effort).
+func saveStateEntries(entries []stateEntry) {
+	path := statePath()
+	if path == "" {
+		return
+	}
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	data, err := json.MarshalIndent(kept, "", "  ")
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return
 	}
 	_ = os.WriteFile(path, data, 0o644)
+}
+
+// forgetState removes entries matching a host label or fingerprint prefix.
+// Returns removed count.
+func forgetState(arg string) int {
+	entries := loadState()
+	kept := entries[:0]
+	removed := 0
+	for _, e := range entries {
+		if e.Host == arg || strings.HasPrefix(e.Fingerprint, arg) {
+			removed++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if removed > 0 {
+		saveStateEntries(kept)
+	}
+	return removed
 }
 
 // loadState reads all recorded entries (empty on any problem).
