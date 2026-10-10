@@ -1,0 +1,17 @@
+# Vault demo: encrypted values in playbook vars.
+# Demo password is "demo" (DO NOT use for real secrets):
+#   echo -n "demo" > /tmp/demo-vault-pass.txt
+#   goaf vault encrypt --vault-pass-file=/tmp/demo-vault-pass.txt "s3cret"
+# Run:
+#   goaf --vault-pass-file=/tmp/demo-vault-pass.txt -i inventory.yml run vault-demo.yml
+#   GOAF_VAULT_PASSWORD=demo goaf -i inventory.yml run vault-demo.yml
+- name: Vault demo
+  hosts: all
+  vars:
+    db_password: |
+      $GOAFVAULT;1.1;AES256
+      1GoRV9uKN/90zEQjCL1oTqa2UeS1eKoxlMUvnY4O57vTMjNPCEAEeStE
+  tasks:
+    - name: Show decrypted length only (never print secrets)
+      command: "echo password-length-is-{{.db_password | len}}"
+      when: '{{eq .goaf_os_family "debian"}}'

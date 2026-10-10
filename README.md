@@ -900,6 +900,9 @@ Encrypt secrets, reference them as `$GOAFVAULT` values in playbook vars.
   # GOAF_VAULT_PASSWORD env also works
   goaf vault decrypt --vault-pass-file=.vaultpw '$GOAFVAULT;...'
 ```
+Working example (demo password is `demo`):
+`examples/playbook/vault-demo.yml` — run with
+`GOAF_VAULT_PASSWORD=demo goaf -i inv.yml run examples/playbook/vault-demo.yml`.
 `$GOAFVAULT` values also work in inventory group/host vars:
 
 ```yaml
