@@ -1020,6 +1020,13 @@ Supported over WinRM: `command` (PowerShell), `copy`, `template`,
 and external modules are Linux-only and fail with a clear error.
 `become` is accepted but ignored on Windows.
 
+Ready-to-run examples (group `win` in inventory):
+
+```bash
+  goaf -i inv-win.yml run examples/playbook/windows-notepad.yml  # start Notepad, verify PID
+  goaf -i inv-win.yml run examples/playbook/windows-install.yml  # install 7-Zip via winget
+```
+
 ## Output - values printed at play end
 
 `output:` values render with the first host's vars (play, group, host,
