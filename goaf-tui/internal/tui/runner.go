@@ -115,12 +115,14 @@ func pipeStderr(r io.Reader, ch chan<- eventMsg) {
 	}
 }
 
-// findGoaf searches for the goaf binary in PATH and common dev paths.
+// findGoaf searches for the goaf binary in PATH and common dev paths
+// (with .exe variants on Windows).
 func findGoaf() (string, error) {
 	if p, err := exec.LookPath("goaf"); err == nil {
 		return p, nil
 	}
-	for _, p := range []string{"../Kod/goaf", "./goaf"} {
+	candidates := []string{"../Kod/goaf", "./goaf", "../Kod/goaf.exe", "./goaf.exe"}
+	for _, p := range candidates {
 		if info, err := os.Stat(p); err == nil && !info.IsDir() {
 			return p, nil
 		}
