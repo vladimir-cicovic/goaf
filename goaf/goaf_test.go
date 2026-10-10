@@ -480,6 +480,92 @@ func TestPlayOutputs(t *testing.T) {
 	}
 }
 
+func TestParseExtResult(t *testing.T) {
+	r, err := parseExtResult("needed: true\noutput: hello\n", "needed")
+	if err != nil || !r.flag || r.output != "hello" {
+		t.Errorf("got %+v, %v", r, err)
+	}
+	r, err = parseExtResult("\n  changed: false  \n", "changed")
+	if err != nil || r.flag {
+		t.Errorf("got %+v, %v", r, err)
+	}
+	r, err = parseExtResult("error: boom\n", "needed")
+	if err != nil || r.errMsg != "boom" {
+		t.Errorf("got %+v, %v", r, err)
+	}
+	if _, err := parseExtResult("garbage\n", "needed"); err == nil {
+		t.Error("expected error for garbage")
+	}
+	if _, err := parseExtResult("changed: true\n", "needed"); err == nil {
+		t.Error("expected error for wrong key")
+	}
+}
+
+func TestRegisterExternalModules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mymod.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	names := listModuleNames()
+	for _, n := range names {
+		if n == "mymod" {
+			t.Fatal("mymod registered too early")
+		}
+	}
+	if err := RegisterExternalModules(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if !externalModuleNames["mymod"] {
+		t.Error("mymod not tracked")
+	}
+	if _, ok := LookupModule("mymod"); !ok {
+		t.Error("mymod factory missing")
+	}
+	if err := RegisterExternalModules(filepath.Join(dir, "nope"), true); err == nil {
+		t.Error("expected error for explicit missing dir")
+	}
+	if err := RegisterExternalModules(filepath.Join(dir, "nope"), false); err != nil {
+		t.Errorf("default missing dir should be ignored: %v", err)
+	}
+}
+
+func TestSetupWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	wsDir := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "vars:\n  db: db-dev\nflat: plain\n"
+	if err := os.WriteFile(filepath.Join(wsDir, "dev.yml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldVars, oldName := workspacesDir, workspaceVars, workspaceName
+	workspacesDir = wsDir
+	defer func() { workspacesDir, workspaceVars, workspaceName = oldDir, oldVars, oldName }()
+	if err := setupWorkspace("dev"); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceName != "dev" || workspaceVars["db"] != "db-dev" || workspaceVars["workspace"] != "dev" {
+		t.Errorf("bad workspace: %q %v", workspaceName, workspaceVars)
+	}
+	if err := setupWorkspace("nope"); err == nil {
+		t.Error("expected error for missing workspace")
+	}
+	// flat form
+	if err := os.WriteFile(filepath.Join(wsDir, "flat.yml"), []byte("a: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupWorkspace("flat"); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceVars["a"] != "1" {
+		t.Errorf("flat form failed: %v", workspaceVars)
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

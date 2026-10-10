@@ -55,6 +55,9 @@ func main() {
 	factsTTLStr := ""
 	flushCache := false
 	askConfirm := false
+	modulesPathFlag := "modules"
+	modulesPathExplicit := false
+	workspaceFlag := ""
 	filtered := os.Args[:1]
 	for _, a := range os.Args[1:] {
 		name, val, hasVal := splitFlag(a)
@@ -107,6 +110,19 @@ func main() {
 			if hasVal {
 				rolesPath = val
 			}
+		case "modules-path":
+			if hasVal {
+				modulesPathFlag = val
+				modulesPathExplicit = true
+			}
+		case "workspace":
+			if hasVal {
+				workspaceFlag = val
+			}
+		case "workspaces-dir":
+			if hasVal {
+				workspacesDir = val
+			}
 		default:
 			filtered = append(filtered, a)
 		}
@@ -137,6 +153,17 @@ func main() {
 		becomePassword = pw
 	}
 
+	if err := RegisterExternalModules(modulesPathFlag, modulesPathExplicit); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Workspace selection applies to run/validate/apply (each loads it).
+	if err := setupWorkspace(workspaceFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Was -i passed explicitly? If not, a missing default inventory is fine
 	// (direct host:port targets don't need one).
 	explicitInv := false
@@ -155,6 +182,14 @@ func main() {
 	// vault helper: goaf vault encrypt|decrypt [value|-] (stdin when omitted)
 	if args[0] == "vault" {
 		runVault(args[1:], vaultPassFileFlag, askVaultPass)
+		return
+	}
+
+	// modules: list registered (builtin + external) modules
+	if args[0] == "modules" {
+		for _, n := range listModuleNames() {
+			fmt.Println(n)
+		}
 		return
 	}
 
@@ -385,6 +420,19 @@ func isKVArg(action, s string) bool {
 	}
 	if action == "template" || action == "set_fact" {
 		return true // any key=value is a variable
+	}
+	if _, ok := knownCLIParams[action]; !ok {
+		// External modules accept any key=value pair.
+		if externalModuleNames[action] {
+			for i, r := range key {
+				if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
+					continue
+				}
+				return false
+			}
+			return true
+		}
+		return false
 	}
 	allowed, ok := knownCLIParams[action]
 	return ok && allowed[key]
@@ -756,7 +804,7 @@ func runValidate(playPath, invPath string) int {
 		collectRuntimeVars(play.PreTasks)
 		collectRuntimeVars(play.Tasks)
 		collectRuntimeVars(play.PostTasks)
-		checkVars := mergeVars(play.Vars, dummyVars)
+		checkVars := mergeVars(mergeVars(workspaceVars, play.Vars), dummyVars)
 		playFailed := 0
 		for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
 			playFailed += validateTaskList(play.Name, section, checkVars, handlers)
@@ -847,6 +895,10 @@ func usage() {
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
 	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("  --confirm          ask [y/N] before applying a playbook run")
+	fmt.Println("  --modules-path=<dir>  external modules dir (default ./modules if present)")
+	fmt.Println("  --roles-path=<dir>    roles base dir (default ./roles if present)")
+	fmt.Println("  --workspace=<name>    environment vars from workspaces/<name>.yml")
+	fmt.Println("  --workspaces-dir=<dir>  workspaces base dir (default ./workspaces)")
 	fmt.Println("\nModules (ad-hoc):")
 	fmt.Println("  command  \"<shell command>\"")
 	fmt.Println("  install  <package>")

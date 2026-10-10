@@ -1157,4 +1157,41 @@ to the including file, then the working directory).
     - name: Common setup
       include_tasks: common-tasks.yml
 ```
+
+## External modules - your own scripts as modules
+
+Any executable script in the modules path becomes a first-class module
+named by file (extension stripped). The script runs on the target with
+params as `GOAF_P_<key>` environment and answers on stdout:
+
+```bash
+  <bin> check        # print "needed: true|false"
+  <bin> apply        # print "changed: true|false"
+  # optional "output: ..." lines, or "error: ..." / non-zero exit on failure
+```
+`.py` files run with `python3`, everything else with `sh`.
+
+```bash
+  goaf --modules-path=./modules -t host motd content="hello" path=/tmp/motd-test
+  goaf modules                   # list builtin + external modules
+```
+`examples/modules/motd.sh` is a working example (file content manager).
+
+## Workspaces - dev/stage/prod variables
+
+`--workspace=name` loads `workspaces/<name>.yml` (flat map or
+`{vars: {...}}` form, vault values allowed). Workspace vars sit under
+play vars; `{{.workspace}}` always holds the name (`default` when unset).
+
+```yaml
+# workspaces/prod.yml
+vars:
+  db_host: db-prod.local
+  pool_size: "50"
+```
+```bash
+  goaf -i inv.yml --workspace=dev run site.yml
+  goaf -i inv.yml --workspace=prod run site.yml
+  goaf -i inv.yml --workspaces-dir=./envs --workspace=prod run site.yml
+```
   
