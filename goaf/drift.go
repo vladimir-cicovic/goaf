@@ -69,7 +69,7 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 				// Fall back to stored connection data.
 				h = Host{Addr: list[0].Addr, Port: list[0].Port, User: list[0].User, Key: list[0].Key}
 			}
-			sess, err := Connect(h)
+			sess, err := dialHost(h)
 			if err != nil {
 				mu.Lock()
 				fmt.Printf("%-28s UNREACHABLE: %v\n", label, err)
@@ -78,7 +78,7 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 				return
 			}
 			defer sess.Close()
-			sess.Become = become
+			sess.SetBecome(become)
 
 			for _, e := range list {
 				factory, ok := LookupModule(e.Module)

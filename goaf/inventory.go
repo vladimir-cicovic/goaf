@@ -61,10 +61,12 @@ type Group struct {
 
 // HostEntry holds per-host variables and optional connection overrides.
 type HostEntry struct {
-	Vars map[string]string `yaml:"vars"`
-	User string            `yaml:"user"`
-	Port int               `yaml:"port"`
-	Key  string            `yaml:"key"`
+	Vars       map[string]string `yaml:"vars"`
+	User       string            `yaml:"user"`
+	Port       int               `yaml:"port"`
+	Key        string            `yaml:"key"`
+	Connection string            `yaml:"connection"` // "ssh" (default) or "winrm"
+	Password   string            `yaml:"password"`   // WinRM password (vault values allowed)
 }
 
 // Inventory describes server groups, per-host entries and global variables.
@@ -72,24 +74,28 @@ type Inventory struct {
 	Groups map[string]Group     `yaml:"groups"`
 	Hosts  map[string]HostEntry `yaml:"hosts"`
 	Vars   struct {
-		User     string `yaml:"user"`
-		Port     int    `yaml:"port"`
-		Key      string `yaml:"key"`
-		JumpHost string `yaml:"jump_host"`
-		JumpPort int    `yaml:"jump_port"`
-		JumpUser string `yaml:"jump_user"`
+		User       string `yaml:"user"`
+		Port       int    `yaml:"port"`
+		Key        string `yaml:"key"`
+		JumpHost   string `yaml:"jump_host"`
+		JumpPort   int    `yaml:"jump_port"`
+		JumpUser   string `yaml:"jump_user"`
+		Connection string `yaml:"connection"` // default connection for all hosts
+		Password   string `yaml:"password"`   // default WinRM password (vault allowed)
 	} `yaml:"vars"`
 }
 
 // Host is a resolved target with all connection parameters.
 type Host struct {
-	Addr     string
-	User     string
-	Port     int
-	Key      string // path to private key; empty = use agent / default keys
-	JumpAddr string // empty = direct connection, non-empty = connect via jump host
-	JumpUser string
-	JumpPort int
+	Addr       string
+	User       string
+	Port       int
+	Key        string // path to private key; empty = use agent / default keys
+	JumpAddr   string // empty = direct connection, non-empty = connect via jump host
+	JumpUser   string
+	JumpPort   int
+	Connection string // "ssh" (default) or "winrm"
+	Password   string // WinRM password (vault values decrypted at load)
 }
 
 // LoadInventory reads and parses a YAML inventory file from the given path.
@@ -182,6 +188,20 @@ func parseInventoryBytes(data []byte) (*Inventory, error) {
 	var inv Inventory
 	if err := yaml.Unmarshal(data, &inv); err != nil {
 		return nil, err
+	}
+	// Decrypt $GOAFVAULT passwords (global + host entries) when possible.
+	if strings.HasPrefix(inv.Vars.Password, vaultHeader) {
+		if dv, err := decryptVaultValue(inv.Vars.Password, vaultPassFile, vaultAskPass); err == nil {
+			inv.Vars.Password = dv
+		}
+	}
+	for key, e := range inv.Hosts {
+		if strings.HasPrefix(e.Password, vaultHeader) {
+			if dv, err := decryptVaultValue(e.Password, vaultPassFile, vaultAskPass); err == nil {
+				e.Password = dv
+				inv.Hosts[key] = e
+			}
+		}
 	}
 	// Decrypt $GOAFVAULT group/host vars when a password is available
 	// (same sources as playbook vars); otherwise envelopes fail clearly
@@ -299,7 +319,11 @@ func (inv *Inventory) hostEntry(raw, addr string) (HostEntry, bool) {
 func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 	hosts := make([]Host, 0, len(rawHosts))
 	for _, raw := range rawHosts {
-		h := Host{User: inv.Vars.User, Port: inv.Vars.Port, Key: inv.Vars.Key}
+		h := Host{User: inv.Vars.User, Port: inv.Vars.Port, Key: inv.Vars.Key,
+			Connection: inv.Vars.Connection, Password: inv.Vars.Password}
+		if h.Connection == "" {
+			h.Connection = "ssh"
+		}
 		if addr, portStr, err := net.SplitHostPort(raw); err == nil {
 			port, err := strconv.Atoi(portStr)
 			if err != nil {
@@ -320,6 +344,16 @@ func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 			if e.Key != "" {
 				h.Key = e.Key
 			}
+			if e.Connection != "" {
+				h.Connection = e.Connection
+			}
+			if e.Password != "" {
+				h.Password = e.Password
+			}
+		}
+		// WinRM defaults to port 5985 unless a port was given explicitly.
+		if h.Connection == "winrm" && h.Port == 22 {
+			h.Port = 5985
 		}
 		if inv.Vars.JumpHost != "" {
 			h.JumpAddr = inv.Vars.JumpHost

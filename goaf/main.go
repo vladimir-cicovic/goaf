@@ -74,6 +74,8 @@ func main() {
 			askBecomePass = true
 		case "ask-vault-pass":
 			askVaultPass = true
+		case "ask-winrm-pass":
+			winrmAskPass = true
 		case "tags":
 			if hasVal {
 				tags = append(tags, splitComma(val)...)
@@ -1016,6 +1018,7 @@ func usage() {
 	fmt.Println("  --serial=<n>    max hosts per batch — rolling update (playbook mode)")
 	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
+	fmt.Println("  --ask-winrm-pass          prompt for the WinRM password (or GOAF_WINRM_PASSWORD)")
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
 	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("  --confirm          ask [y/N] before applying a playbook run")

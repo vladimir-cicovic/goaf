@@ -29,7 +29,7 @@ func GatherFactsAll(hosts []Host, parallelism int) map[string]Facts {
 			defer func() { <-sem }()
 
 			label := hostLabel(h)
-			sess, err := Connect(h)
+			sess, err := dialHost(h)
 			if err != nil {
 				mu.Lock()
 				result[label] = Facts{}
@@ -47,7 +47,10 @@ func GatherFactsAll(hosts []Host, parallelism int) map[string]Facts {
 	return result
 }
 
-func gatherOne(sess *Session) Facts {
+func gatherOne(sess Remote) Facts {
+	if isWinRM(sess) {
+		return gatherWindows(sess)
+	}
 	facts := Facts{}
 
 	// Hostname via /proc — no hostname binary required.
@@ -84,6 +87,46 @@ func gatherOne(sess *Session) Facts {
 		parseOSRelease(out, facts)
 	}
 
+	return facts
+}
+
+// gatherWindows collects facts from a Windows host via PowerShell.
+func gatherWindows(sess Remote) Facts {
+	facts := Facts{
+		"goaf_os":        "windows",
+		"goaf_os_name":   "Windows",
+		"goaf_os_family": "windows",
+	}
+	run := func(ps string) string {
+		out, err := sess.Run(ps)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(out)
+	}
+	if v := run("$env:COMPUTERNAME"); v != "" {
+		facts["goaf_hostname"] = v
+	}
+	if v := run("$env:PROCESSOR_ARCHITECTURE"); v != "" {
+		facts["goaf_arch"] = map[string]string{
+			"AMD64": "amd64", "ARM64": "arm64", "x86": "386",
+		}[v]
+		if facts["goaf_arch"] == "" {
+			facts["goaf_arch"] = v
+		}
+	}
+	if v := run("[System.Environment]::OSVersion.Version.ToString()"); v != "" {
+		facts["goaf_kernel"] = v
+	}
+	if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').ProductName"); v != "" {
+		facts["goaf_os_name"] = v
+	}
+	if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').CurrentBuild"); v != "" {
+		facts["goaf_os_version"] = v
+	}
+	if v := run("(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.AddressState -eq 'Preferred' } | Select-Object -First 1 -ExpandProperty IPAddress)"); v != "" {
+		facts["goaf_ip"] = v
+	}
 	return facts
 }
 
@@ -148,10 +191,10 @@ func deriveFamily(os string) string {
 
 type SetupModule struct{}
 
-func (m SetupModule) Name() string                   { return "setup" }
-func (m SetupModule) Check(_ *Session) (bool, error) { return true, nil }
+func (m SetupModule) Name() string                 { return "setup" }
+func (m SetupModule) Check(_ Remote) (bool, error) { return true, nil }
 
-func (m SetupModule) Apply(s *Session) (string, error) {
+func (m SetupModule) Apply(s Remote) (string, error) {
 	facts := gatherOne(s)
 	keys := make([]string, 0, len(facts))
 	for k := range facts {

@@ -46,13 +46,13 @@ func RunOnHosts(hosts []Host, mod Module, parallelism int, become, checkMode boo
 }
 
 func runOne(host Host, mod Module, become, checkMode bool) Result {
-	sess, err := Connect(host)
+	sess, err := dialHost(host)
 	if err != nil {
 		return Result{Host: hostLabel(host), Err: err}
 	}
 	defer sess.Close()
-	sess.Become = become
-	return RunModule(sess.Host, sess, mod, checkMode)
+	sess.SetBecome(become)
+	return RunModule(sess.DisplayHost(), sess, mod, checkMode)
 }
 
 // runLocalCommand executes a shell command on the control node and returns
@@ -71,11 +71,11 @@ func runLocalCommand(cmd string) (string, error) {
 // connectAll opens one session per host in parallel (connection reuse:
 // one connection serves facts gathering and all tasks of a play).
 // Failures are returned per host label so tasks can report them.
-func connectAll(hosts []Host, parallelism int) (map[string]*Session, map[string]error) {
+func connectAll(hosts []Host, parallelism int) (map[string]Remote, map[string]error) {
 	if parallelism < 1 {
 		parallelism = 1
 	}
-	sessions := make(map[string]*Session, len(hosts))
+	sessions := make(map[string]Remote, len(hosts))
 	connErrs := make(map[string]error)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -88,7 +88,7 @@ func connectAll(hosts []Host, parallelism int) (map[string]*Session, map[string]
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			sess, err := Connect(host)
+			sess, err := dialHost(host)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -104,7 +104,7 @@ func connectAll(hosts []Host, parallelism int) (map[string]*Session, map[string]
 }
 
 // closeAll closes every session in the map.
-func closeAll(sessions map[string]*Session) {
+func closeAll(sessions map[string]Remote) {
 	for _, sess := range sessions {
 		sess.Close()
 	}
@@ -112,7 +112,7 @@ func closeAll(sessions map[string]*Session) {
 
 // runOnSessions executes a per-host built module on existing sessions in
 // parallel. Hosts without a session report the stored connection error.
-func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]*Session, connErrs map[string]error, become, checkMode bool) []Result {
+func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]Remote, connErrs map[string]error, become, checkMode bool) []Result {
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -151,8 +151,8 @@ func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions ma
 				mu.Unlock()
 				return
 			}
-			sess.Become = become
-			res := RunModule(sess.Host, sess, mod, checkMode)
+			sess.SetBecome(become)
+			res := RunModule(sess.DisplayHost(), sess, mod, checkMode)
 
 			mu.Lock()
 			results = append(results, res)

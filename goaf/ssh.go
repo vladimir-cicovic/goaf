@@ -16,6 +16,18 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// Remote abstracts one managed connection (SSH session or WinRM session).
+// All modules and helpers program against this interface.
+type Remote interface {
+	Run(cmd string) (string, error)
+	Upload(localPath, remotePath string) error
+	UploadContent(content []byte, remotePath string) error
+	ReadRemote(remotePath string) ([]byte, error)
+	Close()
+	DisplayHost() string
+	SetBecome(bool)
+}
+
 // Session represents a single SSH connection to one host.
 type Session struct {
 	Host       string // "addr" or "addr:port" for display
@@ -27,6 +39,12 @@ type Session struct {
 	user       string
 	keyPath    string
 }
+
+// DisplayHost implements Remote.
+func (s *Session) DisplayHost() string { return s.Host }
+
+// SetBecome implements Remote.
+func (s *Session) SetBecome(b bool) { s.Become = b }
 
 // authMethods collects available authentication methods.
 // Priority: 1) SSH agent, 2) keyPath if set, 3) ~/.ssh/id_ed25519 and ~/.ssh/id_rsa.
