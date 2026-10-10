@@ -70,6 +70,19 @@ func (m SetFactModule) Name() string                     { return "set_fact" }
 func (m SetFactModule) Check(_ *Session) (bool, error)   { return false, nil }
 func (m SetFactModule) Apply(_ *Session) (string, error) { return "", nil }
 
+// ---------- meta pseudo-module ----------
+// Meta tasks (flush_handlers) are control-side: the runner intercepts them.
+// This stub only exists so ad-hoc mode fails with a clear message instead
+// of "unknown module".
+
+type MetaModule struct{}
+
+func (m MetaModule) Name() string { return "meta" }
+func (m MetaModule) Check(_ *Session) (bool, error) {
+	return false, fmt.Errorf("meta tasks are playbook-only (flush_handlers)")
+}
+func (m MetaModule) Apply(_ *Session) (string, error) { return "", nil }
+
 // ---------- user module ----------
 // Manages local user accounts (needs privilege: sudo is used internally,
 // like the package modules).

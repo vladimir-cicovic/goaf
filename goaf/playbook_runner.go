@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 type hostStats struct {
@@ -22,6 +23,8 @@ type RunOptions struct {
 	SkipTags    []string // never run tasks with these tags
 	Limit       string   // restrict to hosts matching this group/host expression
 	Serial      int      // max hosts per batch, 0 = all at once
+	FactsTTL    int      // reuse cached facts younger than this (seconds, 0 = disabled)
+	FlushCache  bool     // ignore (and refresh) cached facts
 }
 
 // RunPlaybook executes all plays in a playbook and prints Ansible-style output.
@@ -110,8 +113,19 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 			continue
 		}
 
+		abortedRun := false
 		for _, batch := range splitBatches(fresh, opts.Serial) {
-			totalFailed += runBatch(batch, play, inv, opts, stats, registeredVars)
+			if abortedRun {
+				break
+			}
+			var aborted bool
+			var n int
+			n, aborted = runBatch(batch, play, inv, opts, stats, registeredVars)
+			totalFailed += n
+			abortedRun = aborted
+		}
+		if abortedRun {
+			break
 		}
 	}
 
@@ -134,7 +148,8 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 
 // runBatch connects one batch of hosts once (connection reuse), gathers facts
 // on those connections, runs all tasks and handlers, then closes everything.
-func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats map[string]*hostStats, registeredVars map[string]map[string]string) int {
+// Returns failures and whether the run was aborted (any_errors_fatal / max_fail_percentage).
+func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats map[string]*hostStats, registeredVars map[string]map[string]string) (int, bool) {
 	totalFailed := 0
 
 	sessions, connErrs := connectAll(batch, opts.Parallelism)
@@ -144,7 +159,7 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 	var allFacts map[string]Facts
 	if play.GatherFacts {
 		activeEmitter.GatheringFacts()
-		allFacts = gatherFactsOn(sessions, batch)
+		allFacts = gatherFactsOn(sessions, batch, opts.FactsTTL, opts.FlushCache)
 		for _, h := range batch {
 			activeEmitter.FactsGathered(hostLabel(h))
 		}
@@ -163,11 +178,14 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 
 	// pre_tasks, tasks, post_tasks — handlers flush after each section.
 	for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
+		if lr.aborted {
+			break
+		}
 		lr.runList(section, nil, nil, nil, false)
 		lr.flushHandlers()
 	}
 
-	return totalFailed
+	return totalFailed, lr.aborted
 }
 
 // listRunner carries shared state for executing a task list.
@@ -183,6 +201,32 @@ type listRunner struct {
 	registeredVars map[string]map[string]string
 	notified       map[string]map[string]bool
 	totalFailed    *int
+	batchFailed    map[string]bool // hosts failed in this batch (abort checks)
+	aborted        bool
+}
+
+// noteFailure records an unignored failure and aborts the run when the
+// play's any_errors_fatal / max_fail_percentage demands it.
+func (c *listRunner) noteFailure(label string) {
+	if c.batchFailed == nil {
+		c.batchFailed = make(map[string]bool)
+	}
+	c.batchFailed[label] = true
+	if c.aborted {
+		return
+	}
+	if c.play.AnyErrorsFatal {
+		activeEmitter.Diagnostic("aborting: any_errors_fatal set and a task failed")
+		c.aborted = true
+		return
+	}
+	if c.play.MaxFailPct != nil && len(c.batch) > 0 {
+		pct := 100 * len(c.batchFailed) / len(c.batch)
+		if pct > *c.play.MaxFailPct {
+			activeEmitter.Diagnostic(fmt.Sprintf("aborting: %d%% failed hosts exceeds max_fail_percentage %d", pct, *c.play.MaxFailPct))
+			c.aborted = true
+		}
+	}
 }
 
 // runList executes tasks; skip/only restrict hosts (block mechanics) and
@@ -196,6 +240,9 @@ func (c *listRunner) runList(tasks []PlayTask, parentWhen []string, skip, only m
 		effSkip = copySet(skip)
 	}
 	for _, task := range tasks {
+		if c.aborted {
+			return failed
+		}
 		if task.Module == "block" {
 			c.runBlock(task, parentWhen, effSkip, only, failed)
 			continue
@@ -369,26 +416,10 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			taskHosts = taskHosts[:1]
 		}
 
-		var results []Result
-		switch {
-		case task.Module == "debug" || task.Module == "set_fact":
-			results = c.runLocal(taskHosts, task, item)
-		case task.DelegateTo != "":
-			results = c.runDelegated(taskHosts, task, item)
-		default:
-			mkMod := func(h Host) (Module, error) {
-				vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
-				expanded, err := expandVars(task.Params, vars)
-				if err != nil {
-					return nil, err
-				}
-				factory, ok := LookupModule(task.Module)
-				if !ok {
-					return nil, fmt.Errorf("unknown module %q", task.Module)
-				}
-				return factory(expanded)
-			}
-			results = runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+		// ### meta tasks (flush_handlers) — control-side, no per-host run ###
+		if task.Module == "meta" {
+			c.runMeta(task)
+			continue
 		}
 
 		byLabel := make(map[string]Host, len(taskHosts))
@@ -396,13 +427,40 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			byLabel[hostLabel(h)] = h
 		}
 
-		for _, r := range results {
+		// ### retries: 1 + task.Retries attempts, `until` decides success ###
+		pending := taskHosts
+		final := make(map[string]Result, len(taskHosts))
+		for attempt := 0; ; attempt++ {
+			if len(pending) == 0 {
+				break
+			}
+			for _, r := range c.executeItem(pending, task, item) {
+				h := byLabel[r.Host]
+				r = applyTaskControls(r, h, task, c.inv, c.play, item, c.allFacts, c.registeredVars)
+				final[r.Host] = r
+			}
+			var next []Host
+			for _, h := range pending {
+				if c.needsRetry(final[hostLabel(h)], task, h, item) && attempt < task.Retries {
+					next = append(next, h)
+				}
+			}
+			if len(next) == 0 {
+				break
+			}
+			if task.Delay > 0 {
+				time.Sleep(time.Duration(task.Delay) * time.Second)
+			}
+			pending = next
+		}
+
+		for _, h := range taskHosts {
+			r := final[hostLabel(h)]
 			s := c.stats[r.Host]
 			if s == nil {
 				c.stats[r.Host] = &hostStats{}
 				s = c.stats[r.Host]
 			}
-			r = applyTaskControls(r, byLabel[r.Host], task, c.inv, c.play, item, c.allFacts, c.registeredVars)
 			if task.Register != "" {
 				if c.registeredVars[r.Host] == nil {
 					c.registeredVars[r.Host] = make(map[string]string)
@@ -413,6 +471,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			if n > 0 {
 				*c.totalFailed += n
 				failed[r.Host] = true
+				c.noteFailure(r.Host)
 			}
 			// ### notify ### — only hosts that changed without failing
 			if r.Changed && r.Err == nil && task.Notify != "" {
@@ -422,6 +481,67 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 				c.notified[task.Notify][r.Host] = true
 			}
 		}
+		if c.aborted {
+			return
+		}
+	}
+}
+
+// executeItem runs one attempt of a task on the given hosts (no controls).
+func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) []Result {
+	switch {
+	case task.Module == "debug" || task.Module == "set_fact":
+		return c.runLocal(taskHosts, task, item)
+	case task.DelegateTo != "":
+		return c.runDelegated(taskHosts, task, item)
+	default:
+		mkMod := func(h Host) (Module, error) {
+			return c.makeModule(task, h, item)
+		}
+		return runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+	}
+}
+
+// needsRetry reports whether a judged result needs another attempt:
+// unignored failure, or an unmet `until` condition.
+func (c *listRunner) needsRetry(r Result, task PlayTask, h Host, item string) bool {
+	if r.Err != nil && !r.Ignored {
+		if task.Until == "" {
+			return true
+		}
+	}
+	if task.Until == "" {
+		return false
+	}
+	vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
+	vars["result"] = r.Output
+	if r.Changed {
+		vars["changed"] = "true"
+	} else {
+		vars["changed"] = "false"
+	}
+	ok, err := evalWhen(task.Until, vars)
+	if err != nil {
+		activeEmitter.Diagnostic(fmt.Sprintf("ERROR evaluating until: %v", err))
+		return false
+	}
+	return !ok
+}
+
+// runMeta executes a meta task (currently only flush_handlers).
+func (c *listRunner) runMeta(task PlayTask) {
+	action, _ := task.Params["action"]
+	if action == "" {
+		action, _ = task.Params["cmd"]
+	}
+	switch action {
+	case "flush_handlers":
+		n := c.flushHandlers()
+		activeEmitter.TaskResult(Result{Host: "localhost", Output: fmt.Sprintf("flushed %d handler(s)", n)})
+	default:
+		activeEmitter.TaskResult(Result{Host: "localhost",
+			Err: fmt.Errorf("unknown meta action %q (want flush_handlers)", action)})
+		*c.totalFailed++
 	}
 }
 
@@ -515,13 +635,14 @@ func (c *listRunner) runDelegated(taskHosts []Host, task PlayTask, item string) 
 }
 
 // flushHandlers runs notified handlers (per-host) and clears them.
-// Skipped in check mode, like before.
-func (c *listRunner) flushHandlers() {
+// Skipped in check mode, like before. Returns handlers executed.
+func (c *listRunner) flushHandlers() int {
 	if len(c.notified) == 0 || c.opts.CheckMode {
 		// Still clear so re-notify works in later sections.
 		c.notified = make(map[string]map[string]bool)
-		return
+		return 0
 	}
+	ran := 0
 	activeEmitter.HandlersRunning()
 	for _, handler := range c.play.Handlers {
 		triggered := c.notified[handler.Name]
@@ -531,16 +652,7 @@ func (c *listRunner) flushHandlers() {
 		activeEmitter.HandlerHeader(handler.Name)
 
 		mkMod := func(h Host) (Module, error) {
-			vars := taskVars(c.inv, c.play, h, "", c.allFacts, c.registeredVars)
-			expanded, err := expandVars(handler.Params, vars)
-			if err != nil {
-				return nil, err
-			}
-			factory, ok := LookupModule(handler.Module)
-			if !ok {
-				return nil, fmt.Errorf("unknown module %q", handler.Module)
-			}
-			return factory(expanded)
+			return c.makeModule(handler, h, "")
 		}
 
 		var handlerHosts []Host
@@ -557,9 +669,34 @@ func (c *listRunner) flushHandlers() {
 				s = c.stats[r.Host]
 			}
 			*c.totalFailed += applyResult(r, s)
+			ran++
 		}
 	}
 	c.notified = make(map[string]map[string]bool)
+	return ran
+}
+
+// makeModule expands task params for one host and builds the module,
+// resolving role file paths (files//templates/) for role tasks.
+func (c *listRunner) makeModule(task PlayTask, h Host, item string) (Module, error) {
+	vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
+	expanded, err := expandVars(task.Params, vars)
+	if err != nil {
+		return nil, err
+	}
+	if task.RoleDir != "" {
+		switch task.Module {
+		case "copy", "template", "script":
+			if src, ok := expanded["src"]; ok {
+				expanded["src"] = resolveRoleFile(task.RoleDir, task.Module, src)
+			}
+		}
+	}
+	factory, ok := LookupModule(task.Module)
+	if !ok {
+		return nil, fmt.Errorf("unknown module %q", task.Module)
+	}
+	return factory(expanded)
 }
 
 // taskVars merges variable layers for one host and task iteration:
@@ -665,9 +802,20 @@ func splitBatches(hosts []Host, serial int) [][]Host {
 
 // gatherFactsOn collects facts over existing sessions in parallel.
 // Hosts without a session receive an empty Facts map so tasks can still run.
-func gatherFactsOn(sessions map[string]*Session, hosts []Host) map[string]Facts {
+// Fresh-enough cache entries (ttlSec, 0 = disabled) are reused instead of SSH;
+// flush drops the cache first.
+func gatherFactsOn(sessions map[string]*Session, hosts []Host, ttlSec int, flush bool) map[string]Facts {
+	if flush {
+		clearFactsCache()
+	}
 	result := make(map[string]Facts, len(hosts))
 	var mu sync.Mutex
+	var cache map[string]cachedFacts
+	var cacheMu sync.Mutex
+	if ttlSec > 0 {
+		cache = loadFactsCache()
+	}
+	now := time.Now().Unix()
 	var wg sync.WaitGroup
 	semSize := len(hosts)
 	if semSize > 50 {
@@ -677,6 +825,7 @@ func gatherFactsOn(sessions map[string]*Session, hosts []Host) map[string]Facts 
 		semSize = 1
 	}
 	sem := make(chan struct{}, semSize)
+	dirty := false
 
 	for _, host := range hosts {
 		wg.Add(1)
@@ -686,6 +835,17 @@ func gatherFactsOn(sessions map[string]*Session, hosts []Host) map[string]Facts 
 			defer func() { <-sem }()
 
 			label := hostLabel(h)
+			if ttlSec > 0 {
+				cacheMu.Lock()
+				ce, ok := cache[label]
+				cacheMu.Unlock()
+				if ok && now-ce.GatheredAt < int64(ttlSec) && len(ce.Facts) > 0 {
+					cacheMu.Lock()
+					result[label] = ce.Facts
+					cacheMu.Unlock()
+					return
+				}
+			}
 			mu.Lock()
 			sess, ok := sessions[label]
 			mu.Unlock()
@@ -696,9 +856,18 @@ func gatherFactsOn(sessions map[string]*Session, hosts []Host) map[string]Facts 
 			mu.Lock()
 			result[label] = facts
 			mu.Unlock()
+			if ttlSec > 0 && len(facts) > 0 {
+				cacheMu.Lock()
+				cache[label] = cachedFacts{Facts: facts, GatheredAt: now}
+				dirty = true
+				cacheMu.Unlock()
+			}
 		}(host)
 	}
 	wg.Wait()
+	if dirty {
+		saveFactsCache(cache)
+	}
 	return result
 }
 

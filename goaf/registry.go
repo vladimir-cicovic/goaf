@@ -155,6 +155,9 @@ var moduleRegistry = map[string]ModuleFactory{
 	"upgrade": func(_ map[string]string) (Module, error) {
 		return UpgradeModule{}, nil
 	},
+	"meta": func(_ map[string]string) (Module, error) {
+		return MetaModule{}, nil
+	},
 	"script": func(p map[string]string) (Module, error) {
 		src, ok := p["src"]
 		if !ok {
