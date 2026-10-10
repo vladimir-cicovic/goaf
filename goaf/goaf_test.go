@@ -207,6 +207,130 @@ func TestParseTasks(t *testing.T) {
 	}
 }
 
+func TestParseBlock(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  pre_tasks:
+    - name: Pre
+      command: uptime
+  tasks:
+    - name: Deploy
+      block:
+        - name: Do it
+          command: uptime
+        - name: Might fail
+          command: "exit 1"
+      rescue:
+        - name: Fix
+          command: uptime
+      always:
+        - name: Clean
+          command: uptime
+      when: '{{eq .env "prod"}}'
+  post_tasks:
+    - name: Post
+      command: uptime
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plays) != 1 {
+		t.Fatalf("got %d plays", len(plays))
+	}
+	p := plays[0]
+	if len(p.PreTasks) != 1 || len(p.PostTasks) != 1 {
+		t.Errorf("pre/post not parsed: %+v", p)
+	}
+	if len(p.Tasks) != 1 {
+		t.Fatalf("got %d tasks", len(p.Tasks))
+	}
+	b := p.Tasks[0]
+	if b.Module != "block" || len(b.Block) != 2 || len(b.Rescue) != 1 || len(b.Always) != 1 {
+		t.Errorf("bad block parse: %+v", b)
+	}
+	if b.When == "" {
+		t.Error("block when not parsed")
+	}
+}
+
+func TestParseRunOnceDelegate(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  tasks:
+    - name: Once
+      command: uptime
+      run_once: true
+      delegate_to: localhost
+      tags: always
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := plays[0].Tasks[0]
+	if !task.RunOnce || task.DelegateTo != "localhost" {
+		t.Errorf("bad parse: %+v", task)
+	}
+	if len(task.Tags) != 1 || task.Tags[0] != "always" {
+		t.Errorf("bad tags: %+v", task.Tags)
+	}
+}
+
+func TestParseDebugSetFact(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  tasks:
+    - name: D1
+      debug: var=osline
+    - name: D2
+      debug: {msg: "hi {{.x}}"}
+    - name: S1
+      set_fact: {a: "1", b: "2"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := plays[0].Tasks
+	if tasks[0].Module != "debug" || tasks[0].Params["var"] != "osline" {
+		t.Errorf("bad debug shorthand: %+v", tasks[0])
+	}
+	if tasks[1].Params["msg"] != "hi {{.x}}" {
+		t.Errorf("bad debug map: %+v", tasks[1])
+	}
+	if tasks[2].Module != "set_fact" || tasks[2].Params["b"] != "2" {
+		t.Errorf("bad set_fact: %+v", tasks[2])
+	}
+}
+
+func TestParseInventoryBytes(t *testing.T) {
+	inv, err := parseInventoryBytes([]byte(`groups:
+  web:
+    hosts: [h1]
+    vars: {role: web}
+hosts:
+  h1: {vars: {role: special}}
+vars: {user: root}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := inv.varsForHost(Host{Addr: "h1", User: "root", Port: 22}); v["role"] != "special" {
+		t.Errorf("host var should win: %v", v)
+	}
+}
+
+func TestIsInventoryFile(t *testing.T) {
+	for _, p := range []string{"a.yml", "a.yaml", "a.json", "A.YML"} {
+		if !isInventoryFile(p) {
+			t.Errorf("%q should be inventory file", p)
+		}
+	}
+	for _, p := range []string{"gen.sh", "gen.bat", "gen.ps1", "noext"} {
+		if isInventoryFile(p) {
+			t.Errorf("%q should not be inventory file", p)
+		}
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

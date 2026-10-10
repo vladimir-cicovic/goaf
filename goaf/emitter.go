@@ -74,7 +74,11 @@ func (e *TextEmitter) TaskResult(r Result) {
 			fmt.Printf("changed: [%s]\n", r.Host)
 		}
 	default:
-		fmt.Printf("ok: [%s]\n", r.Host)
+		if r.Output != "" {
+			fmt.Printf("ok: [%s] => %s\n", r.Host, r.Output)
+		} else {
+			fmt.Printf("ok: [%s]\n", r.Host)
+		}
 	}
 	if r.Diff != "" {
 		fmt.Printf("    ---\n%s\n", indentDiff(r.Diff))

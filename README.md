@@ -914,4 +914,110 @@ templates, conditions and handler references. No SSH connections.
   # PLAY [Deploy web]: OK (3 hosts, 5 tasks)
   # VALID
 ```
+
+## Blocks - try/catch with rollback
+
+Group tasks; on the first failure remaining block tasks are skipped for
+the failed hosts, `rescue` runs on failed hosts only, `always` always runs.
+A rescued host continues with later tasks.
+
+```yaml
+    - name: Deploy with rollback
+      block:
+        - name: Deploy new version
+          copy: {src: ./app-v2.bin, dest: /opt/app/app.bin}
+        - name: Health check
+          command: "curl -sf http://localhost:8080/health"
+      rescue:
+        - name: Roll back binary
+          copy: {src: ./app-v1.bin, dest: /opt/app/app.bin}
+      always:
+        - name: Cleanup tmp
+          file: {path: /tmp/deploy.tmp, state: absent}
+```
+
+## Pre/post tasks - setup and teardown sections
+
+`pre_tasks` run before `tasks`, `post_tasks` after; handlers flush after
+each section.
+
+```yaml
+- name: Rolling deploy
+  hosts: web
+  pre_tasks:
+    - name: Drain from LB
+      command: "/usr/bin/take_out_of_pool {{.goaf_hostname}}"
+  tasks:
+    - name: Deploy
+      copy: {src: ./app.bin, dest: /opt/app/app.bin}
+  post_tasks:
+    - name: Back to LB
+      command: "/usr/bin/add_to_pool {{.goaf_hostname}}"
+```
+
+## Run once / delegate - single and local execution
+
+`run_once: true` runs the task only on the first host.
+`delegate_to: localhost` runs a `command` task on the control node
+(notifications, local API calls).
+
+```yaml
+    - name: Migrate database
+      command: "/opt/app/migrate-db.sh"
+      run_once: true
+    - name: Notify Slack
+      command: "curl -X POST https://hooks.slack.com/... -d 'deploy done'"
+      delegate_to: localhost
+      run_once: true
+```
+
+## Debug / set_fact - inspect and define variables
+
+```yaml
+    - name: Show value
+      debug: var=osline
+    - name: Show message
+      debug: {msg: "deploying {{.pkg}} to {{.env}}"}
+    - name: Compute port
+      set_fact: {app_port: "8080"}
+```
+
+## Script / fetch modules - run scripts, pull files
+
+`script` uploads a local script and executes it (always runs, Linux-only).
+`fetch` downloads a remote file (reverse of `copy`).
+
+Syntax:
+```bash
+  goaf -t <host> script src=<script> [args=<args>]
+  goaf -t <host> fetch src=<remote> dest=<local>
+```
+Examples:
+```bash
+  goaf -t host script src=./check-disk.sh args="--warn 80"
+  goaf -t host fetch src=/var/log/app.log dest=./logs/
+```
+
+## Plan file - review before apply
+
+Save a run (playbook + inventory + options snapshot), review it,
+apply the exact same run later — optionally as dry-run.
+
+```bash
+  goaf -i inv.yml run site.yml --save-plan=v2.plan
+  goaf apply v2.plan
+  goaf apply v2.plan --check
+```
+
+## Dynamic inventory - hosts from a script
+
+Instead of a static file, `-i` accepts `exec:<command>` or an executable
+script file; its stdout must be inventory YAML (or JSON).
+
+```bash
+  goaf -i "exec:./docker-inventory.sh" -t docker command "uptime"
+  goaf -i ./gen-inventory.bat -t web command "uptime"
+```
+`examples/inventory/docker-inventory.sh` builds a group from local docker
+containers publishing SSH (port 22); `GOAF_USER`/`GOAF_HOST` tune the output.
   
