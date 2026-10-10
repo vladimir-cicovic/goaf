@@ -566,6 +566,51 @@ func TestSetupWorkspace(t *testing.T) {
 	}
 }
 
+func TestFingerprintStable(t *testing.T) {
+	a := fingerprintOf("h1", "copy", map[string]string{"b": "2", "a": "1"})
+	b := fingerprintOf("h1", "copy", map[string]string{"a": "1", "b": "2"})
+	if a != b || a == "" {
+		t.Errorf("fingerprint must be order-independent: %q vs %q", a, b)
+	}
+	if c := fingerprintOf("h1", "copy", map[string]string{"a": "1"}); c == a {
+		t.Error("different params must differ")
+	}
+}
+
+func TestForgetState(t *testing.T) {
+	dir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	t.Setenv("HOME", dir)
+	defer func() {
+		if oldHome != "" {
+			t.Setenv("HOME", oldHome)
+		}
+	}()
+	h := Host{Addr: "h1", User: "root", Port: 22}
+	recordState(h, "p", "copy", map[string]string{"dest": "/x"}, "out")
+	recordState(h, "p", "file", map[string]string{"path": "/y"}, "out")
+	if len(loadState()) != 2 {
+		t.Fatalf("got %d entries", len(loadState()))
+	}
+	if n := forgetState("h1"); n != 2 {
+		t.Errorf("forget host: removed %d", n)
+	}
+	if len(loadState()) != 0 {
+		t.Error("state should be empty")
+	}
+	recordState(h, "p", "copy", map[string]string{"dest": "/x"}, "out")
+	entries := loadState()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries", len(entries))
+	}
+	if n := forgetState(entries[0].Fingerprint[:8]); n != 1 {
+		t.Errorf("forget by prefix: removed %d", n)
+	}
+	if n := forgetState("nope"); n != 0 {
+		t.Errorf("forget missing: removed %d", n)
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

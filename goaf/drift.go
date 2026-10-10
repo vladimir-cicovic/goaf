@@ -3,14 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
 // runDrift re-checks recorded state against live hosts: for every managed
 // piece (host + module + params) it runs Check and reports whether the host
 // is still in the desired state (OK), drifted (DRIFT), or errored.
+// With fix=true, drifted pieces are re-applied (FIXED) and re-checked.
 // Returns 0 when clean, 2 when drift/errors were found.
-func runDrift(invPath string, become bool, parallelism int) int {
+func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 	inv, err := LoadInventory(invPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading inventory: %v\n", err)
@@ -96,6 +98,22 @@ func runDrift(invPath string, become bool, parallelism int) int {
 					continue
 				}
 				needed, err := mod.Check(sess)
+				if err == nil && needed && fix {
+					if out, aerr := mod.Apply(sess); aerr != nil {
+						err = fmt.Errorf("fix failed: %w: %s", aerr, strings.TrimSpace(out))
+					} else if again, cerr := mod.Check(sess); cerr != nil {
+						err = fmt.Errorf("re-check failed: %w", cerr)
+					} else if again {
+						err = fmt.Errorf("still drifted after fix")
+					} else {
+						mu.Lock()
+						fmt.Printf("%-28s FIXED: %s\n", label, describeEntry(e))
+						okCount++
+						mu.Unlock()
+						recordState(h, "drift-fix", e.Module, e.Params, strings.TrimSpace(out))
+						continue
+					}
+				}
 				mu.Lock()
 				switch {
 				case err != nil:

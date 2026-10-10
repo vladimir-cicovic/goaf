@@ -941,6 +941,23 @@ reports whether hosts are still in the desired state.
 ```
 Exit code is 2 when drift or errors are found (CI-friendly).
 
+`--fix` re-applies drifted pieces and re-checks them:
+
+```bash
+  goaf -i inv.yml drift --fix
+  # 192.168.1.11:2222          FIXED: copy /etc/app.conf
+  # drift: 2 ok, 0 drifted, 0 errors
+```
+
+## State - inspect and forget tracked changes
+
+```bash
+  goaf state list                  # all recorded pieces (time, host, module, fingerprint, play)
+  goaf state list 10.0.0.20:2222   # one host
+  goaf state forget 10.0.0.20:2222 # drop a decommissioned host
+  goaf state forget 5da0019c       # drop by fingerprint prefix
+```
+
 ## Audit - who ran what
 
 Every ad-hoc, playbook and apply run appends one JSON line to
