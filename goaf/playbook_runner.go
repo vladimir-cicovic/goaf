@@ -17,6 +17,7 @@ type hostStats struct {
 type RunOptions struct {
 	Parallelism int
 	CheckMode   bool
+	Become      bool     // CLI --become forces privilege escalation on all plays
 	Tags        []string // run only tasks with these tags ("always" always runs)
 	SkipTags    []string // never run tasks with these tags
 	Limit       string   // restrict to hosts matching this group/host expression
@@ -153,67 +154,230 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 
 	notified := make(map[string]map[string]bool) // handler name -> host labels that triggered it
 
-	for _, task := range play.Tasks {
-		if !tagsAllow(task, opts) {
-			for _, h := range batch {
-				label := hostLabel(h)
-				activeEmitter.TaskSkipped(label, "tagged out")
-				stats[label].skipped++
+	lr := &listRunner{
+		batch: batch, play: play, inv: inv, opts: opts, stats: stats,
+		sessions: sessions, connErrs: connErrs, allFacts: allFacts,
+		registeredVars: registeredVars, notified: notified,
+		totalFailed: &totalFailed,
+	}
+
+	// pre_tasks, tasks, post_tasks — handlers flush after each section.
+	for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
+		lr.runList(section, nil, nil, nil, false)
+		lr.flushHandlers()
+	}
+
+	return totalFailed
+}
+
+// listRunner carries shared state for executing a task list.
+type listRunner struct {
+	batch          []Host
+	play           Play
+	inv            *Inventory
+	opts           RunOptions
+	stats          map[string]*hostStats
+	sessions       map[string]*Session
+	connErrs       map[string]error
+	allFacts       map[string]Facts
+	registeredVars map[string]map[string]string
+	notified       map[string]map[string]bool
+	totalFailed    *int
+}
+
+// runList executes tasks; skip/only restrict hosts (block mechanics) and
+// parentWhen ANDs an outer block condition. Returns labels failed in this list.
+// When stopOnFail is true (inside blocks), hosts failing a task are skipped
+// for the rest of this list; at play level it is false (goaf continues).
+func (c *listRunner) runList(tasks []PlayTask, parentWhen []string, skip, only map[string]bool, stopOnFail bool) map[string]bool {
+	failed := map[string]bool{}
+	effSkip := skip
+	if stopOnFail {
+		effSkip = copySet(skip)
+	}
+	for _, task := range tasks {
+		if task.Module == "block" {
+			c.runBlock(task, parentWhen, effSkip, only, failed)
+			continue
+		}
+		c.runSingle(task, parentWhen, effSkip, only, failed)
+		if stopOnFail {
+			for h := range failed {
+				effSkip[h] = true
 			}
+		}
+	}
+	return failed
+}
+
+// copySet returns a mutable copy of a label set (nil stays nil-ready).
+func copySet(s map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(s))
+	for h := range s {
+		out[h] = true
+	}
+	return out
+}
+
+// runBlock executes block/rescue/always with per-host failure tracking:
+// remaining block tasks skip failed hosts, rescue runs on failed hosts only,
+// always runs on all hosts. A rescued host is removed from the failed set.
+func (c *listRunner) runBlock(task PlayTask, parentWhen []string, skip, only map[string]bool, parentFailed map[string]bool) {
+	if !tagsAllow(task, c.opts) {
+		for _, h := range c.batch {
+			if c.inScope(h, skip, only) {
+				c.skipHost(h, "tagged out")
+			}
+		}
+		return
+	}
+	withBlock := parentWhen
+	if task.When != "" {
+		withBlock = append(append([]string{}, parentWhen...), task.When)
+	}
+	innerFailed := c.runList(task.Block, withBlock, skip, only, true)
+	if len(innerFailed) > 0 && len(task.Rescue) > 0 {
+		rescueFailed := c.runList(task.Rescue, parentWhen, skip, innerFailed, false)
+		for h := range innerFailed {
+			if !rescueFailed[h] {
+				delete(innerFailed, h) // recovered
+			}
+		}
+		for h := range rescueFailed {
+			innerFailed[h] = true
+		}
+	}
+	if len(task.Always) > 0 {
+		alwaysFailed := c.runList(task.Always, parentWhen, skip, only, false)
+		for h := range alwaysFailed {
+			innerFailed[h] = true
+		}
+	}
+	for h := range innerFailed {
+		parentFailed[h] = true
+	}
+}
+
+// evalAll evaluates every condition; all must hold (AND).
+func evalAll(conds []string, vars map[string]string) (bool, error) {
+	for _, cond := range conds {
+		if cond == "" {
+			continue
+		}
+		ok, err := evalWhen(cond, vars)
+		if err != nil || !ok {
+			return ok, err
+		}
+	}
+	return true, nil
+}
+
+// inScope reports whether a host passes the skip/only filters.
+func (c *listRunner) inScope(h Host, skip, only map[string]bool) bool {
+	label := hostLabel(h)
+	if skip[label] {
+		return false
+	}
+	if len(only) > 0 && !only[label] {
+		return false
+	}
+	return true
+}
+
+func (c *listRunner) skipHost(h Host, reason string) {
+	label := hostLabel(h)
+	activeEmitter.TaskSkipped(label, reason)
+	if s := c.stats[label]; s != nil {
+		s.skipped++
+	} else {
+		c.stats[label] = &hostStats{skipped: 1}
+	}
+}
+
+// evalBoth evaluates parent conditions AND the task condition for one host.
+func (c *listRunner) evalBoth(h Host, vars map[string]string, parentWhen []string, taskWhen string) (bool, error) {
+	if ok, err := evalAll(parentWhen, vars); err != nil || !ok {
+		return ok, err
+	}
+	if taskWhen != "" {
+		return evalWhen(taskWhen, vars)
+	}
+	return true, nil
+}
+
+// runSingle executes one non-block task (with loop items) on scoped hosts.
+func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only map[string]bool, failed map[string]bool) {
+	if !tagsAllow(task, c.opts) {
+		for _, h := range c.batch {
+			if c.inScope(h, skip, only) {
+				c.skipHost(h, "tagged out")
+			}
+		}
+		return
+	}
+
+	items := task.Loop
+	if len(items) == 0 {
+		items = []string{""}
+	}
+
+	for _, item := range items {
+		label := task.Name
+		if item != "" {
+			label += " [item=" + item + "]"
+		}
+
+		// ### per-host when (parent AND task) ###
+		var taskHosts []Host
+		for _, h := range c.batch {
+			if !c.inScope(h, skip, only) {
+				continue
+			}
+			hVars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
+			shouldRun, err := c.evalBoth(h, hVars, parentWhen, task.When)
+			if err != nil {
+				activeEmitter.Diagnostic(fmt.Sprintf("ERROR evaluating when: %v", err))
+				*c.totalFailed++
+				shouldRun = false
+			}
+			if shouldRun {
+				taskHosts = append(taskHosts, h)
+			}
+		}
+
+		activeEmitter.TaskHeader(label)
+
+		// Emit skipped events for scoped-out hosts.
+		scoped := make(map[string]bool, len(taskHosts))
+		for _, h := range taskHosts {
+			scoped[hostLabel(h)] = true
+		}
+		for _, h := range c.batch {
+			if c.inScope(h, skip, only) && !scoped[hostLabel(h)] {
+				c.skipHost(h, "when condition false")
+			}
+		}
+		if len(taskHosts) == 0 {
 			continue
 		}
 
-		// ### loop / single ###
-		items := task.Loop
-		if len(items) == 0 {
-			items = []string{""}
+		// ### run_once — first host only ###
+		if task.RunOnce && len(taskHosts) > 1 {
+			for _, h := range taskHosts[1:] {
+				c.skipHost(h, "run_once (ran on "+hostLabel(taskHosts[0])+")")
+			}
+			taskHosts = taskHosts[:1]
 		}
 
-		for _, item := range items {
-			label := task.Name
-			if item != "" {
-				label += " [item=" + item + "]"
-			}
-
-			// ### per-host when ###
-			taskHosts := batch
-			if task.When != "" {
-				taskHosts = nil
-				for _, h := range batch {
-					hVars := taskVars(inv, play, h, item, allFacts, registeredVars)
-					shouldRun, err := evalWhen(task.When, hVars)
-					if err != nil {
-						activeEmitter.Diagnostic(fmt.Sprintf("ERROR evaluating when: %v", err))
-						totalFailed++
-						shouldRun = false
-					}
-					if shouldRun {
-						taskHosts = append(taskHosts, h)
-					}
-				}
-			}
-
-			activeEmitter.TaskHeader(label)
-
-			// Emit skipped events for hosts filtered out by when.
-			if task.When != "" {
-				taskHostSet := make(map[string]bool, len(taskHosts))
-				for _, h := range taskHosts {
-					taskHostSet[hostLabel(h)] = true
-				}
-				for _, h := range batch {
-					if !taskHostSet[hostLabel(h)] {
-						activeEmitter.TaskSkipped(hostLabel(h), "when condition false")
-						stats[hostLabel(h)].skipped++
-					}
-				}
-				if len(taskHosts) == 0 {
-					continue
-				}
-			}
-
+		var results []Result
+		switch {
+		case task.Module == "debug" || task.Module == "set_fact":
+			results = c.runLocal(taskHosts, task, item)
+		case task.DelegateTo != "":
+			results = c.runDelegated(taskHosts, task, item)
+		default:
 			mkMod := func(h Host) (Module, error) {
-				vars := taskVars(inv, play, h, item, allFacts, registeredVars)
+				vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
 				expanded, err := expandVars(task.Params, vars)
 				if err != nil {
 					return nil, err
@@ -224,83 +388,178 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 				}
 				return factory(expanded)
 			}
+			results = runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+		}
 
-			byLabel := make(map[string]Host, len(taskHosts))
-			for _, h := range taskHosts {
-				byLabel[hostLabel(h)] = h
+		byLabel := make(map[string]Host, len(taskHosts))
+		for _, h := range taskHosts {
+			byLabel[hostLabel(h)] = h
+		}
+
+		for _, r := range results {
+			s := c.stats[r.Host]
+			if s == nil {
+				c.stats[r.Host] = &hostStats{}
+				s = c.stats[r.Host]
 			}
-
-			results := runOnSessions(taskHosts, mkMod, sessions, connErrs, play.Become, opts.CheckMode)
-			for _, r := range results {
-				s := stats[r.Host]
-				if s == nil {
-					stats[r.Host] = &hostStats{}
-					s = stats[r.Host]
+			r = applyTaskControls(r, byLabel[r.Host], task, c.inv, c.play, item, c.allFacts, c.registeredVars)
+			if task.Register != "" {
+				if c.registeredVars[r.Host] == nil {
+					c.registeredVars[r.Host] = make(map[string]string)
 				}
-				r = applyTaskControls(r, byLabel[r.Host], task, inv, play, item, allFacts, registeredVars)
-				if task.Register != "" {
-					if registeredVars[r.Host] == nil {
-						registeredVars[r.Host] = make(map[string]string)
-					}
-					registeredVars[r.Host][task.Register] = r.Output
+				c.registeredVars[r.Host][task.Register] = r.Output
+			}
+			n := applyResult(r, s)
+			if n > 0 {
+				*c.totalFailed += n
+				failed[r.Host] = true
+			}
+			// ### notify ### — only hosts that changed without failing
+			if r.Changed && r.Err == nil && task.Notify != "" {
+				if c.notified[task.Notify] == nil {
+					c.notified[task.Notify] = make(map[string]bool)
 				}
-				n := applyResult(r, s)
-				if n > 0 {
-					totalFailed += n
-				}
-				// ### notify ### — only hosts that changed without failing
-				if r.Changed && r.Err == nil && task.Notify != "" {
-					if notified[task.Notify] == nil {
-						notified[task.Notify] = make(map[string]bool)
-					}
-					notified[task.Notify][r.Host] = true
-				}
+				c.notified[task.Notify][r.Host] = true
 			}
 		}
 	}
+}
 
-	// ### handlers ### — run only on notified hosts (never in check mode)
-	if len(notified) > 0 && !opts.CheckMode {
-		activeEmitter.HandlersRunning()
-		for _, handler := range play.Handlers {
-			triggered := notified[handler.Name]
-			if len(triggered) == 0 {
+// runLocal executes control-side tasks (debug, set_fact) without SSH.
+func (c *listRunner) runLocal(taskHosts []Host, task PlayTask, item string) []Result {
+	results := make([]Result, 0, len(taskHosts))
+	for _, h := range taskHosts {
+		label := hostLabel(h)
+		vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
+		switch task.Module {
+		case "debug":
+			results = append(results, runDebug(label, task, vars))
+		case "set_fact":
+			expanded, err := expandVars(task.Params, vars)
+			if err != nil {
+				results = append(results, Result{Host: label, Err: err})
 				continue
 			}
-			activeEmitter.HandlerHeader(handler.Name)
-
-			mkMod := func(h Host) (Module, error) {
-				vars := taskVars(inv, play, h, "", allFacts, registeredVars)
-				expanded, err := expandVars(handler.Params, vars)
-				if err != nil {
-					return nil, err
-				}
-				factory, ok := LookupModule(handler.Module)
-				if !ok {
-					return nil, fmt.Errorf("unknown module %q", handler.Module)
-				}
-				return factory(expanded)
+			if c.registeredVars[label] == nil {
+				c.registeredVars[label] = make(map[string]string)
 			}
-
-			var handlerHosts []Host
-			for _, h := range batch {
-				if triggered[hostLabel(h)] {
-					handlerHosts = append(handlerHosts, h)
-				}
+			keys := make([]string, 0, len(expanded))
+			for k, v := range expanded {
+				c.registeredVars[label][k] = v
+				keys = append(keys, k+"="+v)
 			}
-			results := runOnSessions(handlerHosts, mkMod, sessions, connErrs, play.Become, opts.CheckMode)
-			for _, r := range results {
-				s := stats[r.Host]
-				if s == nil {
-					stats[r.Host] = &hostStats{}
-					s = stats[r.Host]
-				}
-				totalFailed += applyResult(r, s)
-			}
+			results = append(results, Result{Host: label, Output: "set: " + strings.Join(keys, ", ")})
 		}
 	}
+	return results
+}
 
-	return totalFailed
+// runDebug renders a debug task: var=<name> prints one variable,
+// msg=<text> prints expanded text.
+func runDebug(label string, task PlayTask, vars map[string]string) Result {
+	if v, ok := task.Params["var"]; ok {
+		return Result{Host: label, Output: v + ": " + vars[v]}
+	}
+	msg, ok := task.Params["msg"]
+	if !ok {
+		return Result{Host: label, Err: fmt.Errorf("debug needs 'var' or 'msg'")}
+	}
+	expanded, err := expandVars(map[string]string{"msg": msg}, vars)
+	if err != nil {
+		return Result{Host: label, Err: err}
+	}
+	return Result{Host: label, Output: expanded["msg"]}
+}
+
+// runDelegated runs a command task on the control node (delegate_to:
+// localhost). Other modules are rejected — they need a remote session.
+func (c *listRunner) runDelegated(taskHosts []Host, task PlayTask, item string) []Result {
+	if task.DelegateTo != "localhost" && task.DelegateTo != "127.0.0.1" {
+		results := make([]Result, 0, len(taskHosts))
+		for _, h := range taskHosts {
+			results = append(results, Result{Host: hostLabel(h),
+				Err: fmt.Errorf("delegate_to supports only localhost, got %q", task.DelegateTo)})
+		}
+		return results
+	}
+	if task.Module != "command" {
+		results := make([]Result, 0, len(taskHosts))
+		for _, h := range taskHosts {
+			results = append(results, Result{Host: hostLabel(h),
+				Err: fmt.Errorf("delegate_to: localhost supports the command module only, got %q", task.Module)})
+		}
+		return results
+	}
+	results := make([]Result, 0, len(taskHosts))
+	for _, h := range taskHosts {
+		label := hostLabel(h)
+		vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
+		expanded, err := expandVars(task.Params, vars)
+		if err != nil {
+			results = append(results, Result{Host: label, Err: err})
+			continue
+		}
+		cmd, ok := expanded["cmd"]
+		if !ok {
+			results = append(results, Result{Host: label, Err: fmt.Errorf("command needs 'cmd'")})
+			continue
+		}
+		out, err := runLocalCommand(cmd)
+		if err != nil {
+			results = append(results, Result{Host: label, Output: out, Err: err})
+			continue
+		}
+		results = append(results, Result{Host: label, Changed: true, Output: out})
+	}
+	return results
+}
+
+// flushHandlers runs notified handlers (per-host) and clears them.
+// Skipped in check mode, like before.
+func (c *listRunner) flushHandlers() {
+	if len(c.notified) == 0 || c.opts.CheckMode {
+		// Still clear so re-notify works in later sections.
+		c.notified = make(map[string]map[string]bool)
+		return
+	}
+	activeEmitter.HandlersRunning()
+	for _, handler := range c.play.Handlers {
+		triggered := c.notified[handler.Name]
+		if len(triggered) == 0 {
+			continue
+		}
+		activeEmitter.HandlerHeader(handler.Name)
+
+		mkMod := func(h Host) (Module, error) {
+			vars := taskVars(c.inv, c.play, h, "", c.allFacts, c.registeredVars)
+			expanded, err := expandVars(handler.Params, vars)
+			if err != nil {
+				return nil, err
+			}
+			factory, ok := LookupModule(handler.Module)
+			if !ok {
+				return nil, fmt.Errorf("unknown module %q", handler.Module)
+			}
+			return factory(expanded)
+		}
+
+		var handlerHosts []Host
+		for _, h := range c.batch {
+			if triggered[hostLabel(h)] {
+				handlerHosts = append(handlerHosts, h)
+			}
+		}
+		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+		for _, r := range results {
+			s := c.stats[r.Host]
+			if s == nil {
+				c.stats[r.Host] = &hostStats{}
+				s = c.stats[r.Host]
+			}
+			*c.totalFailed += applyResult(r, s)
+		}
+	}
+	c.notified = make(map[string]map[string]bool)
 }
 
 // taskVars merges variable layers for one host and task iteration:
