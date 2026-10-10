@@ -654,6 +654,75 @@ func taskParams(modName string, val interface{}) (map[string]string, error) {
 var vaultPassFile string
 var vaultAskPass bool
 
+// workspaceName / workspaceVars select environment variables:
+// --workspace=name loads workspaces/<name>.yml, merged under play vars.
+// "workspace" itself is always available as a variable (default "default").
+var workspaceName = "default"
+var workspaceVars = map[string]string{"workspace": "default"}
+
+// workspacesDir is the base directory for workspaces (flag --workspaces-dir).
+var workspacesDir = "workspaces"
+
+// setupWorkspace loads the requested workspace file into workspaceVars.
+// Unknown workspace (other than default) is an error; "default" without a
+// file just sets the workspace name.
+func setupWorkspace(name string) error {
+	if name == "" {
+		name = "default"
+	}
+	workspaceName = name
+	workspaceVars = map[string]string{"workspace": name}
+	if name == "default" {
+		if _, err := os.Stat(filepath.Join(workspacesDir, "default.yml")); err != nil {
+			return nil // default workspace needs no file
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(workspacesDir, name+".yml"))
+	if err != nil {
+		return fmt.Errorf("workspace %q: %w", name, err)
+	}
+	// Nested {vars: {...}} form first, flat key=value map otherwise.
+	var doc map[string]string
+	if nested, ok := rawVarsKey(data); ok {
+		doc = nested
+	} else {
+		doc = map[string]string{}
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return fmt.Errorf("workspace %q: %w", name, err)
+		}
+	}
+	decrypted, err := decryptVarMap("workspace "+name, doc)
+	if err != nil {
+		return err
+	}
+	for k, v := range decrypted {
+		workspaceVars[k] = v
+	}
+	workspaceVars["workspace"] = name
+	return nil
+}
+
+// rawVarsKey extracts a top-level "vars:" map when present.
+func rawVarsKey(data []byte) (map[string]string, bool) {
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, false
+	}
+	v, ok := doc["vars"]
+	if !ok {
+		return nil, false
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		out[k] = fmt.Sprintf("%v", val)
+	}
+	return out, true
+}
+
 // expandVars renders Go template expressions in each param value using vars.
 // $GOAFVAULT values are decrypted first (password via --vault-pass-file,
 // --ask-vault-pass or GOAF_VAULT_PASSWORD).

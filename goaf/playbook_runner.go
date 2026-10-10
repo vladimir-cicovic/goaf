@@ -726,9 +726,13 @@ func printPlayOutputs(play Play, inv *Inventory, h Host, facts map[string]Facts,
 }
 
 // taskVars merges variable layers for one host and task iteration:
-// inventory (group, then host) < play vars < facts < loop item < registered.
+// inventory (group, then host) < workspace < play vars < facts < loop item
+// < registered.
 func taskVars(inv *Inventory, play Play, h Host, item string, facts map[string]Facts, registeredVars map[string]map[string]string) map[string]string {
 	vars := inv.varsForHost(h)
+	for k, v := range workspaceVars {
+		vars[k] = v
+	}
 	for k, v := range play.Vars {
 		vars[k] = v
 	}
