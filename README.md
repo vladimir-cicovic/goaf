@@ -1034,12 +1034,20 @@ Supported over WinRM: `command` (PowerShell), `copy`, `template`,
 and external modules are Linux-only and fail with a clear error.
 `become` is accepted but ignored on Windows.
 
-Ready-to-run examples (group `win` in inventory):
+Ready-to-run examples (group `win` in inventory, run from repo root):
 
 ```bash
   goaf -i inv-win.yml run examples/playbook/windows-notepad.yml  # start Notepad, verify PID
   goaf -i inv-win.yml run examples/playbook/windows-install.yml  # install 7-Zip via winget
+  goaf -i inv-win.yml run examples/playbook/windows-screenshot.yml  # desktop screenshot via /IT task, downloads PNG
+  goaf -i inv-win.yml run examples/playbook/windows-keylog.yml      # ASCII key capture with app headers, 2 min default
 ```
+
+Key capture (`windows-keylog.yml`, own machines only): an interactive
+scheduled task (`/IT`, fully hidden via VBS launcher) records pressed
+keys as plain ASCII (`capture_seconds` var sets the limit, default
+`"120"`), prefixing window/tab switches (`[Notepad]`, browser tabs).
+WinRM shells (session 0) see no input, hence the scheduled task.
 
 Windows inventory extras:
 

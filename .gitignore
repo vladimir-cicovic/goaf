@@ -11,3 +11,7 @@ goaf-tui/goaf-tui
 
 # OS
 .DS_Store
+
+# Test artifacts (screenshots / key logs fetched during demos)
+screenshots/
+captured/

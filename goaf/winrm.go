@@ -10,9 +10,9 @@ import (
 	"github.com/masterzen/winrm"
 )
 
-// winrmChunk is the max base64 characters per upload command (well under
-// WinRM envelope limits).
-const winrmChunk = 4000
+// winrmChunk is the max base64 characters per upload command. Kept small:
+// long single command lines are rejected ("command line is too long").
+const winrmChunk = 1500
 
 // WinRMSession manages one Windows host over WinRM (HTTP + NTLM).
 // Shell is PowerShell, run via RunPSWithString (the library encodes transport).

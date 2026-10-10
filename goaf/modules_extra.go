@@ -500,8 +500,9 @@ func (m RebootModule) Apply(s Remote) (string, error) {
 
 // applyWin reboots a Windows host and waits for WinRM to return.
 func (m RebootModule) applyWin(s *WinRMSession) (string, error) {
+	oldBoot, _ := s.Run("(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')")
 	_, _ = s.Run("Restart-Computer -Force")
-	if err := waitForRebootWinRM(s, m.timeout()); err != nil {
+	if err := waitForRebootWinRM(s, m.timeout(), strings.TrimSpace(oldBoot)); err != nil {
 		return "", err
 	}
 	if m.Msg != "" {

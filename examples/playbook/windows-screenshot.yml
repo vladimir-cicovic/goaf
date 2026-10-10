@@ -1,0 +1,28 @@
+# Windows demo: screenshot the guest desktop and download the PNG.
+# Run from the repo root (script path below is relative to it).
+# A scheduled task with /IT is required: WinRM shells run in session 0
+# without a visible desktop, so direct capture would be black.
+- name: Windows screenshot demo
+  hosts: win
+  tasks:
+    - name: Upload screenshot script
+      copy: {src: examples/windows/Take-Screenshot.ps1, dest: C:/Temp/shot.ps1}
+
+    - name: Create interactive task
+      command: 'schtasks /create /tn goaf-shot /tr "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:/Temp/shot.ps1" /sc once /st 23:59 /f /IT'
+
+    - name: Run screenshot task
+      command: "schtasks /run /tn goaf-shot"
+
+    - name: Wait for PNG
+      command: "(Test-Path C:/Temp/screen.png)"
+      register: shot
+      retries: 6
+      delay: 5
+      until: '{{eq .result "True"}}'
+
+    - name: Download screenshot
+      fetch: {src: C:/Temp/screen.png, dest: ./screenshots/}
+
+    - name: Cleanup task
+      command: "schtasks /delete /tn goaf-shot /f"
