@@ -49,7 +49,7 @@ func authMethods(keyPath string) ([]ssh.AuthMethod, error) {
 		}
 	} else {
 		for _, name := range []string{"id_ed25519", "id_rsa"} {
-			p := filepath.Join(os.Getenv("HOME"), ".ssh", name)
+			p := filepath.Join(homeDir(), ".ssh", name)
 			if data, err := os.ReadFile(p); err == nil {
 				if signer, err := ssh.ParsePrivateKey(data); err == nil {
 					methods = append(methods, ssh.PublicKeys(signer))
@@ -66,9 +66,22 @@ func authMethods(keyPath string) ([]ssh.AuthMethod, error) {
 
 func expandPath(p string) string {
 	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(os.Getenv("HOME"), p[2:])
+		return filepath.Join(homeDir(), p[2:])
 	}
 	return p
+}
+
+// homeDir returns the user's home directory: $HOME (trimmed — launchers
+// sometimes append a trailing space) with os.UserHomeDir() as fallback,
+// so %USERPROFILE% works on Windows even when HOME is unset.
+func homeDir() string {
+	if h := strings.TrimSpace(os.Getenv("HOME")); h != "" {
+		return h
+	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return ""
 }
 
 // Connect opens an SSH connection to the host with known_hosts verification.
@@ -79,7 +92,7 @@ func Connect(h Host) (*Session, error) {
 		return nil, err
 	}
 
-	knownHostsPath := filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")
+	knownHostsPath := filepath.Join(homeDir(), ".ssh", "known_hosts")
 	hostKeyCallback, err := knownhosts.New(knownHostsPath)
 	if err != nil {
 		return nil, fmt.Errorf(
