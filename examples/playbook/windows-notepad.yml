@@ -1,0 +1,21 @@
+# Windows demo: start Notepad on WinRM hosts (group "win" in inventory).
+# NOTE: WinRM commands run non-interactively and child processes may not
+# survive the shell exit, so Notepad is verified by PID right after launch
+# (use a scheduled task with /IT for persistent/visible GUI apps).
+- name: Windows notepad demo
+  hosts: win
+  tasks:
+    - name: Check notepad
+      command: "(Get-Process -Name notepad -ErrorAction SilentlyContinue | Measure-Object).Count"
+      register: running
+
+    - name: Start notepad
+      command: "Start-Process notepad"
+      when: '{{eq .running "0"}}'
+
+    - name: Show notepad pid
+      command: "(Get-Process -Name notepad | Select-Object -First 1 -ExpandProperty Id)"
+      register: notepad_pid
+
+    - name: Report
+      debug: {msg: "notepad running with pid={{.notepad_pid}}"}

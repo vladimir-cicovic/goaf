@@ -203,7 +203,7 @@ type listRunner struct {
 	inv            *Inventory
 	opts           RunOptions
 	stats          map[string]*hostStats
-	sessions       map[string]*Session
+	sessions       map[string]Remote
 	connErrs       map[string]error
 	allFacts       map[string]Facts
 	registeredVars map[string]map[string]string
@@ -866,7 +866,7 @@ func splitBatches(hosts []Host, serial int) [][]Host {
 // Hosts without a session receive an empty Facts map so tasks can still run.
 // Fresh-enough cache entries (ttlSec, 0 = disabled) are reused instead of SSH;
 // flush drops the cache first.
-func gatherFactsOn(sessions map[string]*Session, hosts []Host, ttlSec int, flush bool) map[string]Facts {
+func gatherFactsOn(sessions map[string]Remote, hosts []Host, ttlSec int, flush bool) map[string]Facts {
 	if flush {
 		clearFactsCache()
 	}

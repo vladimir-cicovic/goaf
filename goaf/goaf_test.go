@@ -611,6 +611,60 @@ func TestForgetState(t *testing.T) {
 	}
 }
 
+func TestPsQuote(t *testing.T) {
+	if got := psQuote("abc"); got != "'abc'" {
+		t.Errorf("got %q", got)
+	}
+	if got := psQuote("a'b"); got != "'a''b'" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestWinParent(t *testing.T) {
+	cases := map[string]string{
+		`C:/Temp/x.txt`:  `C:/Temp`,
+		`C:\Temp\x.txt`:  `C:\Temp`,
+		`C:/x.txt`:       `C:/`,
+		`relative/f.txt`: `relative`,
+		`plain.txt`:      "",
+	}
+	for in, want := range cases {
+		if got := winParent(in); got != want {
+			t.Errorf("winParent(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestInventoryWinRM(t *testing.T) {
+	inv, err := parseInventoryBytes([]byte(`groups:
+  win:
+    hosts: [10.0.0.5]
+hosts:
+  10.0.0.5:
+    user: admin
+    connection: winrm
+    password: s3cret
+vars: {user: root}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts, err := inv.Resolve("win")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("got %d hosts", len(hosts))
+	}
+	h := hosts[0]
+	if h.Connection != "winrm" || h.Password != "s3cret" || h.User != "admin" {
+		t.Errorf("bad winrm host: %+v", h)
+	}
+	if h.Port != 5985 {
+		t.Errorf("default winrm port should be 5985, got %d", h.Port)
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

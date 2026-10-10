@@ -3,10 +3,8 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"strings"
 	"text/template"
 )
 
@@ -22,18 +20,20 @@ type TemplateModule struct {
 
 func (m TemplateModule) Name() string { return "template" }
 
-func (m TemplateModule) Check(s *Session) (bool, error) {
+func (m TemplateModule) Check(s Remote) (bool, error) {
 	rendered, err := m.render()
 	if err != nil {
 		return false, err
 	}
-	localHash := bytesSHA256(rendered)
-	out, _ := s.Run("sha256sum " + shQuote(m.Dest) + " 2>/dev/null | awk '{print $1}'")
-	remoteHash := strings.TrimSpace(out)
-	return localHash != remoteHash, nil
+	// Control-side compare: no remote hashing tools needed (works over WinRM).
+	old, rerr := s.ReadRemote(m.Dest)
+	if rerr != nil {
+		return true, nil // missing remote file → must deploy
+	}
+	return sha256.Sum256(rendered) != sha256.Sum256(old), nil
 }
 
-func (m TemplateModule) Apply(s *Session) (string, error) {
+func (m TemplateModule) Apply(s Remote) (string, error) {
 	rendered, err := m.render()
 	if err != nil {
 		return "", err
@@ -53,7 +53,7 @@ func (m TemplateModule) Apply(s *Session) (string, error) {
 }
 
 // Diff shows the unified diff of current remote content vs rendered template.
-func (m TemplateModule) Diff(s *Session) (string, error) {
+func (m TemplateModule) Diff(s Remote) (string, error) {
 	rendered, err := m.render()
 	if err != nil {
 		return "", err
@@ -81,9 +81,4 @@ func (m TemplateModule) render() ([]byte, error) {
 		return nil, fmt.Errorf("executing template: %w", err)
 	}
 	return buf.Bytes(), nil
-}
-
-func bytesSHA256(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
 }

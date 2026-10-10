@@ -17,9 +17,12 @@ type FileModule struct {
 
 func (m FileModule) Name() string { return "file" }
 
-func (m FileModule) Check(s *Session) (bool, error) {
+func (m FileModule) Check(s Remote) (bool, error) {
 	state := m.state()
 
+	if isWinRM(s) {
+		return m.checkWin(state, s)
+	}
 	out, _ := s.Run("stat -c '%F|%a|%U|%G' " + shQuote(m.Path) + " 2>/dev/null || echo ABSENT")
 	current := strings.TrimSpace(out)
 
@@ -59,9 +62,12 @@ func (m FileModule) Check(s *Session) (bool, error) {
 	return false, nil
 }
 
-func (m FileModule) Apply(s *Session) (string, error) {
+func (m FileModule) Apply(s Remote) (string, error) {
 	state := m.state()
 
+	if isWinRM(s) {
+		return m.applyWin(state, s)
+	}
 	q := shQuote(m.Path)
 	if state == "absent" {
 		if _, err := s.Run("rm -rf " + q); err != nil {
@@ -110,8 +116,65 @@ func (m FileModule) state() string {
 	return m.State
 }
 
+// winStat returns "ABSENT", "file" or "directory" for Windows targets.
+func winStat(s Remote, path string) string {
+	out, _ := s.Run("if (Test-Path " + psQuote(path) + " -PathType Container) { 'directory' } elseif (Test-Path " + psQuote(path) + ") { 'file' } else { 'ABSENT' }")
+	return strings.TrimSpace(out)
+}
+
+// checkWin is Check for Windows targets (type/state only;
+// mode/owner/group are Unix concepts and ignored there).
+func (m FileModule) checkWin(state string, s Remote) (bool, error) {
+	current := winStat(s, m.Path)
+	if state == "absent" {
+		return current != "ABSENT", nil
+	}
+	if current == "ABSENT" {
+		return true, nil
+	}
+	return current != state, nil
+}
+
+// applyWin is Apply for Windows targets (mode/owner/group ignored).
+func (m FileModule) applyWin(state string, s Remote) (string, error) {
+	q := psQuote(m.Path)
+	if state == "absent" {
+		if _, err := s.Run("Remove-Item -Path " + q + " -Recurse -Force"); err != nil {
+			return "", fmt.Errorf("deleting '%s': %w", m.Path, err)
+		}
+		return "deleted: " + m.Path, nil
+	}
+	if state == "directory" {
+		if _, err := s.Run("New-Item -Path " + q + " -ItemType Directory -Force | Out-Null"); err != nil {
+			return "", fmt.Errorf("creating directory '%s': %w", m.Path, err)
+		}
+	} else {
+		if _, err := s.Run("$d=[IO.Path]::GetDirectoryName(" + q + "); if ($d -and -not (Test-Path $d)) { New-Item -Path $d -ItemType Directory -Force | Out-Null }; New-Item -Path " + q + " -ItemType File -Force | Out-Null"); err != nil {
+			return "", fmt.Errorf("creating file '%s': %w", m.Path, err)
+		}
+	}
+	return state + ": " + m.Path, nil
+}
+
 // Diff shows which attributes would change (type/mode/owner/group).
-func (m FileModule) Diff(s *Session) (string, error) {
+func (m FileModule) Diff(s Remote) (string, error) {
+	if isWinRM(s) {
+		state := m.state()
+		cur := winStat(s, m.Path)
+		if cur == "ABSENT" {
+			if state == "absent" {
+				return "", nil
+			}
+			return "+" + state + ": " + m.Path, nil
+		}
+		if state == "absent" {
+			return "-" + cur + ": " + m.Path, nil
+		}
+		if cur != state {
+			return "-type=" + cur + "\n+type=" + state, nil
+		}
+		return "", nil
+	}
 	out, _ := s.Run("stat -c '%F|%a|%U|%G' " + shQuote(m.Path) + " 2>/dev/null || echo ABSENT")
 	cur := strings.TrimSpace(out)
 	state := m.state()
