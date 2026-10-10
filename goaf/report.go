@@ -10,11 +10,12 @@ import (
 
 // RunReport holds a structured summary of one goaf run for JSON/HTML output.
 type RunReport struct {
-	Timestamp string       `json:"timestamp"`
-	CheckMode bool         `json:"check_mode"`
-	Mode      string       `json:"mode"` // "adhoc" or "playbook"
-	Summary   ReportStats  `json:"summary"`
-	Hosts     []ReportHost `json:"hosts"`
+	Timestamp string            `json:"timestamp"`
+	CheckMode bool              `json:"check_mode"`
+	Mode      string            `json:"mode"` // "adhoc" or "playbook"
+	Summary   ReportStats       `json:"summary"`
+	Hosts     []ReportHost      `json:"hosts"`
+	Outputs   map[string]string `json:"outputs,omitempty"`
 }
 
 type ReportStats struct {

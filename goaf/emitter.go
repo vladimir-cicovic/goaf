@@ -18,6 +18,7 @@ type Emitter interface {
 	FactsGathered(host string)
 	TaskHeader(label string)
 	TaskSkipped(host, reason string)
+	PlayOutput(name, value string)
 	TaskResult(r Result)
 	HandlersRunning()
 	HandlerHeader(name string)
@@ -124,6 +125,10 @@ func (e *TextEmitter) RunFinished(_ int, _ int, _ int) {}
 
 func (e *TextEmitter) Diagnostic(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
+}
+
+func (e *TextEmitter) PlayOutput(name, value string) {
+	fmt.Printf("  output: %s = %s\n", name, value)
 }
 
 // ### JSONEmitter ###
@@ -242,4 +247,8 @@ func (e *JSONEmitter) RunFinished(ok, changed, failed int) {
 
 func (e *JSONEmitter) Diagnostic(msg string) {
 	_ = e.errEnc.Encode(map[string]any{"type": "diagnostic", "msg": msg})
+}
+
+func (e *JSONEmitter) PlayOutput(name, value string) {
+	e.emit(map[string]any{"type": "play_output", "name": name, "value": value})
 }

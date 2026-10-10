@@ -423,6 +423,63 @@ func TestIncludeTasks(t *testing.T) {
 	}
 }
 
+func TestParseSerial(t *testing.T) {
+	n, pct := parseSerial("")
+	if n != 0 || pct != 0 {
+		t.Errorf("empty: got %d/%d", n, pct)
+	}
+	n, pct = parseSerial("2")
+	if n != 2 || pct != 0 {
+		t.Errorf("int: got %d/%d", n, pct)
+	}
+	n, pct = parseSerial("40%")
+	if n != 0 || pct != 40 {
+		t.Errorf("pct: got %d/%d", n, pct)
+	}
+}
+
+func TestEffectiveSerial(t *testing.T) {
+	if got := effectiveSerial(RunOptions{SerialPct: 40}, 5); got != 2 {
+		t.Errorf("40%% of 5: got %d", got)
+	}
+	if got := effectiveSerial(RunOptions{SerialPct: 50}, 1); got != 1 {
+		t.Errorf("min 1: got %d", got)
+	}
+	if got := effectiveSerial(RunOptions{Serial: 3}, 10); got != 3 {
+		t.Errorf("int: got %d", got)
+	}
+	if got := effectiveSerial(RunOptions{}, 10); got != 0 {
+		t.Errorf("unset: got %d", got)
+	}
+}
+
+func TestConfirmNonTerminal(t *testing.T) {
+	// go test stdin is not a terminal → proceeds with notice
+	inv := &Inventory{Groups: map[string]Group{
+		"web": {Hosts: []string{"h1", "h2"}},
+	}}
+	plays := []Play{{Name: "p", Hosts: "web"}}
+	if !confirmRun(plays, inv, "") {
+		t.Error("non-terminal should proceed")
+	}
+}
+
+func TestPlayOutputs(t *testing.T) {
+	report := newReport("playbook", false)
+	play := Play{Name: "p", Vars: map[string]string{"env": "prod"},
+		Outputs: map[string]string{"salute": "hi-{{.env}}", "bad": "{{.nope}}\""}}
+	inv := &Inventory{}
+	facts := map[string]Facts{"h1": {"goaf_os": "debian"}}
+	reg := map[string]map[string]string{}
+	printPlayOutputs(play, inv, Host{Addr: "h1"}, facts, reg, report)
+	if report.Outputs["salute"] != "hi-prod" {
+		t.Errorf("bad outputs: %v", report.Outputs)
+	}
+	if _, ok := report.Outputs["bad"]; ok {
+		t.Errorf("broken output should be skipped: %v", report.Outputs)
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

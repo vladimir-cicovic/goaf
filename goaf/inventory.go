@@ -183,6 +183,25 @@ func parseInventoryBytes(data []byte) (*Inventory, error) {
 	if err := yaml.Unmarshal(data, &inv); err != nil {
 		return nil, err
 	}
+	// Decrypt $GOAFVAULT group/host vars when a password is available
+	// (same sources as playbook vars); otherwise envelopes fail clearly
+	// when actually used.
+	for name, g := range inv.Groups {
+		decrypted, err := decryptVarMap("inventory group "+name, g.Vars)
+		if err != nil {
+			return nil, err
+		}
+		g.Vars = decrypted
+		inv.Groups[name] = g
+	}
+	for key, e := range inv.Hosts {
+		decrypted, err := decryptVarMap("inventory host "+key, e.Vars)
+		if err != nil {
+			return nil, err
+		}
+		e.Vars = decrypted
+		inv.Hosts[key] = e
+	}
 	if inv.Vars.User == "" {
 		inv.Vars.User = "root"
 	}

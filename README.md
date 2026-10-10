@@ -869,6 +869,7 @@ Tasks tagged `always` run even with `--tags` (unless skipped).
 ```bash
   goaf -i inv.yml --limit=web run site.yml     # only web hosts
   goaf -i inv.yml --serial=2 run site.yml      # two hosts at a time
+  goaf -i inv.yml --serial=25% run site.yml    # percent of hosts per batch
 ```
 
 ## Diff and backup
@@ -902,6 +903,47 @@ Encrypt secrets, reference them as `$GOAFVAULT` values in playbook vars.
   goaf --ask-vault-pass -i inv.yml run site.yml   # prompt
   # GOAF_VAULT_PASSWORD env also works
   goaf vault decrypt --vault-pass-file=.vaultpw '$GOAFVAULT;...'
+```
+`$GOAFVAULT` values also work in inventory group/host vars:
+
+```yaml
+groups:
+  db:
+    hosts: [10.0.0.20]
+    vars:
+      db_password: |
+        $GOAFVAULT;1.1;AES256
+        afSWfweuLIHUe1o2Z8Us...
+```
+
+## Confirm - ask before apply
+
+`--confirm` asks `Run N play(s) on M host(s)? [y/N]` before a playbook
+run or plan apply (anything but `y` aborts). Without a terminal
+(pipes, CI) it prints a notice and proceeds.
+
+```bash
+  goaf -i inv.yml --confirm run site.yml
+  goaf apply v2.plan --confirm
+```
+
+## Output - values printed at play end
+
+`output:` values render with the first host's vars (play, group, host,
+facts, registered) and print after the play, also landing in reports.
+
+```yaml
+- name: Deploy
+  hosts: web
+  tasks:
+    - name: Record version
+      command: "cat /opt/app/VERSION"
+      register: ver
+  output:
+    deployed: "{{.ver}} on {{.goaf_os}}"
+```
+```
+  output: deployed = 2.4.1 on debian
 ```
 
 ## Validate - check without connecting

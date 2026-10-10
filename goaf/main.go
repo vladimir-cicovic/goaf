@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // splitFlag parses "-name", "--name" and "--name=value" (also single dash).
@@ -51,6 +54,7 @@ func main() {
 	savePlan := ""
 	factsTTLStr := ""
 	flushCache := false
+	askConfirm := false
 	filtered := os.Args[:1]
 	for _, a := range os.Args[1:] {
 		name, val, hasVal := splitFlag(a)
@@ -97,6 +101,8 @@ func main() {
 			}
 		case "flush-cache":
 			flushCache = true
+		case "confirm":
+			askConfirm = true
 		case "roles-path":
 			if hasVal {
 				rolesPath = val
@@ -158,7 +164,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: goaf apply <plan.json> [--check]")
 			os.Exit(1)
 		}
-		if code := runApply(args[1], *parallel, checkMode, *reportPath); code != 0 {
+		if code := runApply(args[1], *parallel, checkMode, *reportPath, askConfirm); code != 0 {
 			os.Exit(code)
 		}
 		return
@@ -199,6 +205,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error loading playbook: %v\n", err)
 			os.Exit(1)
 		}
+		serialN, serialPct := parseSerial(serialStr)
 		opts := RunOptions{
 			Parallelism: *parallel,
 			CheckMode:   checkMode,
@@ -206,9 +213,14 @@ func main() {
 			Tags:        tags,
 			SkipTags:    skipTags,
 			Limit:       limitStr,
-			Serial:      parseSerial(serialStr),
+			Serial:      serialN,
+			SerialPct:   serialPct,
 			FactsTTL:    parseFactsTTL(factsTTLStr),
 			FlushCache:  flushCache,
+		}
+		if askConfirm && !confirmRun(plays, inv, limitStr) {
+			fmt.Fprintln(os.Stderr, "aborted by user")
+			os.Exit(3)
 		}
 		if savePlan != "" {
 			if err := savePlanFile(savePlan, args[1], *invPath, opts, becomeMode); err != nil {
@@ -447,17 +459,64 @@ func splitLines(s string) []string {
 	return lines
 }
 
-// parseSerial parses --serial=N (hosts per batch).
-func parseSerial(s string) int {
+// parseSerial parses --serial=N (hosts per batch) or --serial=N% (percent).
+// Returns (count, percent); only one is non-zero.
+func parseSerial(s string) (int, int) {
+	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0
+		return 0, 0
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if strings.HasSuffix(s, "%") {
+		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(s, "%")))
+		if err != nil || n <= 0 || n > 100 {
+			fmt.Fprintf(os.Stderr, "invalid --serial value %q (want 1-100%%)\n", s)
+			os.Exit(1)
+		}
+		return 0, n
+	}
+	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 {
 		fmt.Fprintf(os.Stderr, "invalid --serial value %q (want a non-negative integer)\n", s)
 		os.Exit(1)
 	}
-	return n
+	return n, 0
+}
+
+// confirmRun asks "run N play(s) on M host(s)? [y/N]" on a terminal.
+// Without a terminal (piped/CI) it prints a notice and proceeds.
+func confirmRun(plays []Play, inv *Inventory, limit string) bool {
+	set := map[string]bool{}
+	for _, play := range plays {
+		hosts, err := inv.Resolve(play.Hosts)
+		if err != nil {
+			continue
+		}
+		for _, h := range hosts {
+			set[hostLabel(h)] = true
+		}
+	}
+	if limit != "" {
+		limHosts, err := inv.Resolve(limit)
+		if err == nil {
+			lim := map[string]bool{}
+			for _, h := range limHosts {
+				lim[hostLabel(h)] = true
+			}
+			for label := range set {
+				if !lim[label] {
+					delete(set, label)
+				}
+			}
+		}
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintf(os.Stderr, "--confirm: no terminal, proceeding with %d play(s) on %d host(s)\n", len(plays), len(set))
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "Run %d play(s) on %d host(s)? [y/N]: ", len(plays), len(set))
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
 }
 
 // parseFactsTTL parses --facts-ttl=N (seconds, default 3600).
@@ -488,6 +547,7 @@ type runPlan struct {
 	SkipTags      []string `json:"skip_tags"`
 	Limit         string   `json:"limit"`
 	Serial        int      `json:"serial"`
+	SerialPct     int      `json:"serial_pct"`
 }
 
 // savePlanFile snapshots the playbook/inventory files and run options.
@@ -513,6 +573,7 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 		SkipTags:      opts.SkipTags,
 		Limit:         opts.Limit,
 		Serial:        opts.Serial,
+		SerialPct:     opts.SerialPct,
 	}
 	data, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
@@ -522,7 +583,7 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 }
 
 // runApply executes a saved plan file. --check forces dry-run on top.
-func runApply(planPath string, parallel int, forceCheck bool, reportPath string) int {
+func runApply(planPath string, parallel int, forceCheck bool, reportPath string, askConfirm bool) int {
 	_ = parallel
 	raw, err := os.ReadFile(planPath)
 	if err != nil {
@@ -574,6 +635,10 @@ func runApply(planPath string, parallel int, forceCheck bool, reportPath string)
 		fmt.Fprintf(os.Stderr, "error loading plan playbook: %v\n", err)
 		return 1
 	}
+	if askConfirm && !confirmRun(plays, inv, plan.Limit) {
+		fmt.Fprintln(os.Stderr, "aborted by user")
+		return 3
+	}
 	opts := RunOptions{
 		Parallelism: plan.Parallelism,
 		CheckMode:   forceCheck,
@@ -582,6 +647,8 @@ func runApply(planPath string, parallel int, forceCheck bool, reportPath string)
 		SkipTags:    plan.SkipTags,
 		Limit:       plan.Limit,
 		Serial:      plan.Serial,
+		SerialPct:   plan.SerialPct,
+		FactsTTL:    3600,
 	}
 	activeEmitter.RunStarted("playbook", 0, opts.Parallelism, opts.CheckMode)
 	failed, report := RunPlaybookOpts(plays, inv, opts)
@@ -779,6 +846,7 @@ func usage() {
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
 	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
+	fmt.Println("  --confirm          ask [y/N] before applying a playbook run")
 	fmt.Println("\nModules (ad-hoc):")
 	fmt.Println("  command  \"<shell command>\"")
 	fmt.Println("  install  <package>")
