@@ -155,6 +155,33 @@ var moduleRegistry = map[string]ModuleFactory{
 	"upgrade": func(_ map[string]string) (Module, error) {
 		return UpgradeModule{}, nil
 	},
+	"script": func(p map[string]string) (Module, error) {
+		src, ok := p["src"]
+		if !ok {
+			return nil, fmt.Errorf("module 'script' requires parameter 'src'")
+		}
+		return ScriptModule{Src: src, Args: p["args"]}, nil
+	},
+	"fetch": func(p map[string]string) (Module, error) {
+		src, ok := p["src"]
+		if !ok {
+			return nil, fmt.Errorf("module 'fetch' requires parameter 'src'")
+		}
+		dest, ok := p["dest"]
+		if !ok {
+			return nil, fmt.Errorf("module 'fetch' requires parameter 'dest'")
+		}
+		return FetchModule{Src: src, Dest: dest}, nil
+	},
+	"debug": func(p map[string]string) (Module, error) {
+		// Real handling happens in the runner (control-side, no SSH).
+		// This stub only exists so validate accepts the module.
+		return DebugModule{Var: p["var"], Msg: p["msg"]}, nil
+	},
+	"set_fact": func(p map[string]string) (Module, error) {
+		// Real handling happens in the runner (merges into host vars).
+		return SetFactModule{Vars: p}, nil
+	},
 }
 
 // LookupModule returns the factory for the given module name, or false if not found.

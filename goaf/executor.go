@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -50,6 +53,19 @@ func runOne(host Host, mod Module, become, checkMode bool) Result {
 	defer sess.Close()
 	sess.Become = become
 	return RunModule(sess.Host, sess, mod, checkMode)
+}
+
+// runLocalCommand executes a shell command on the control node and returns
+// trimmed combined output (used by delegate_to: localhost).
+func runLocalCommand(cmd string) (string, error) {
+	var c *exec.Cmd
+	if runtime.GOOS == "windows" {
+		c = exec.Command("cmd", "/c", cmd)
+	} else {
+		c = exec.Command("sh", "-c", cmd)
+	}
+	out, err := c.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 // connectAll opens one session per host in parallel (connection reuse:
