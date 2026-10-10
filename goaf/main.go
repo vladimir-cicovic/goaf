@@ -153,6 +153,8 @@ func main() {
 		becomePassword = pw
 	}
 
+	started := time.Now()
+
 	if err := RegisterExternalModules(modulesPathFlag, modulesPathExplicit); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -189,6 +191,37 @@ func main() {
 	if args[0] == "modules" {
 		for _, n := range listModuleNames() {
 			fmt.Println(n)
+		}
+		return
+	}
+
+	// drift: re-check recorded state against live hosts
+	if args[0] == "drift" {
+		os.Exit(runDrift(*invPath, becomeMode, *parallel))
+	}
+
+	// audit: list recorded runs (newest last)
+	if args[0] == "audit" {
+		n := 20
+		if len(args) > 1 {
+			if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
+				n = v
+			}
+		}
+		records := listAudit(n)
+		if len(records) == 0 {
+			fmt.Println("no recorded runs yet (~/.goaf/audit.log)")
+			return
+		}
+		fmt.Printf("%-16s %-8s %-10s %5s %4s %8s %7s  %s\n", "TIME", "USER", "MODE", "HOSTS", "OK", "CHANGED", "FAILED", "DETAIL")
+		for _, r := range records {
+			detail := r.Target
+			if r.Playbook != "" {
+				detail = r.Playbook
+			}
+			fmt.Printf("%-16s %-8s %-10s %5d %4d %8d %7d  %s\n",
+				strings.Replace(r.Time, "T", " ", 1)[:16], r.User, r.Mode,
+				r.Hosts, r.Ok, r.Changed, r.Failed, detail)
 		}
 		return
 	}
@@ -271,6 +304,12 @@ func main() {
 				fmt.Fprintf(os.Stderr, "report error: %v\n", err)
 			}
 		}
+		appendAudit(auditRecord{
+			Mode: "playbook", Playbook: args[1], Hosts: len(report.Hosts),
+			Ok: report.Summary.Ok, Changed: report.Summary.Changed,
+			Failed: report.Summary.Failed, CheckMode: checkMode,
+			Ms: time.Since(started).Milliseconds(),
+		})
 		if failed > 0 {
 			os.Exit(2)
 		}
@@ -357,6 +396,32 @@ func main() {
 			fmt.Printf("\nPASS: %d/%d  CHANGED: %d  FAIL: %d\n", passed+changed, total, changed, failed)
 		}
 	}
+
+	// Record applied ad-hoc changes for drift detection (idempotent
+	// modules only — always-run modules would flag drift forever).
+	switch args[0] {
+	case "debug", "set_fact", "meta", "command", "upgrade", "reboot", "script", "setup":
+	default:
+		if !checkMode {
+			params := parseCLIParams(args)
+			byLabel := make(map[string]Host, len(hosts))
+			for _, h := range hosts {
+				byLabel[hostLabel(h)] = h
+			}
+			for _, r := range results {
+				if r.Changed && r.Err == nil {
+					if h, ok := byLabel[r.Host]; ok {
+						recordState(h, "ad-hoc", args[0], params, r.Output)
+					}
+				}
+			}
+		}
+	}
+	appendAudit(auditRecord{
+		Mode: "adhoc", Target: *target, Hosts: total,
+		Ok: passed + changed, Changed: changed, Failed: failed,
+		CheckMode: checkMode, Ms: time.Since(started).Milliseconds(),
+	})
 
 	if *reportPath != "" {
 		report := newReport("adhoc", checkMode)
@@ -632,6 +697,7 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 
 // runApply executes a saved plan file. --check forces dry-run on top.
 func runApply(planPath string, parallel int, forceCheck bool, reportPath string, askConfirm bool) int {
+	started := time.Now()
 	_ = parallel
 	raw, err := os.ReadFile(planPath)
 	if err != nil {
@@ -705,6 +771,12 @@ func runApply(planPath string, parallel int, forceCheck bool, reportPath string,
 			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
 		}
 	}
+	appendAudit(auditRecord{
+		Mode: "apply", Playbook: plan.PlaybookName + " < " + planPath,
+		Hosts: len(report.Hosts), Ok: report.Summary.Ok,
+		Changed: report.Summary.Changed, Failed: report.Summary.Failed,
+		CheckMode: opts.CheckMode, Ms: time.Since(started).Milliseconds(),
+	})
 	if failed > 0 {
 		return 2
 	}

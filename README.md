@@ -927,6 +927,37 @@ run or plan apply (anything but `y` aborts). Without a terminal
   goaf apply v2.plan --confirm
 ```
 
+## Drift - is the fleet still as applied
+
+Every applied change (idempotent modules only) is recorded in
+`~/.goaf/state.json`. `drift` re-runs Check for each recorded piece and
+reports whether hosts are still in the desired state.
+
+```bash
+  goaf -i inv.yml drift
+  # 192.168.1.10:2222          OK: copy /etc/app.conf
+  # 192.168.1.11:2222          DRIFT: install tree
+  # drift: 1 ok, 1 drifted, 0 errors
+```
+Exit code is 2 when drift or errors are found (CI-friendly).
+
+## Audit - who ran what
+
+Every ad-hoc, playbook and apply run appends one JSON line to
+`~/.goaf/audit.log` (time, user, mode, hosts, ok/changed/failed).
+
+```bash
+  goaf audit        # last 20 runs
+  goaf audit 50     # last 50 runs
+```
+
+## History replay - rewatch runs in the TUI
+
+`goaf-tui` records every run's NDJSON stream to `~/.goaf/history`.
+In the Monitor panel press `H` to browse past runs, Enter to replay one
+(rendered exactly like live, including diffs), Esc to return to live.
+`goaf-tui --history` lists recordings without the UI.
+
 ## Output - values printed at play end
 
 `output:` values render with the first host's vars (play, group, host,
