@@ -65,8 +65,9 @@ type HostEntry struct {
 	User       string            `yaml:"user"`
 	Port       int               `yaml:"port"`
 	Key        string            `yaml:"key"`
-	Connection string            `yaml:"connection"` // "ssh" (default) or "winrm"
-	Password   string            `yaml:"password"`   // WinRM password (vault values allowed)
+	Connection string            `yaml:"connection"`  // "ssh" (default) or "winrm"
+	Password   string            `yaml:"password"`    // WinRM password (vault values allowed)
+	WinRMHTTPS bool              `yaml:"winrm_https"` // WinRM over TLS (default port 5986)
 }
 
 // Inventory describes server groups, per-host entries and global variables.
@@ -82,6 +83,7 @@ type Inventory struct {
 		JumpUser   string `yaml:"jump_user"`
 		Connection string `yaml:"connection"` // default connection for all hosts
 		Password   string `yaml:"password"`   // default WinRM password (vault allowed)
+		WinRMHTTPS bool   `yaml:"winrm_https"`
 	} `yaml:"vars"`
 }
 
@@ -96,6 +98,7 @@ type Host struct {
 	JumpPort   int
 	Connection string // "ssh" (default) or "winrm"
 	Password   string // WinRM password (vault values decrypted at load)
+	WinRMHTTPS bool
 }
 
 // LoadInventory reads and parses a YAML inventory file from the given path.
@@ -320,7 +323,8 @@ func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 	hosts := make([]Host, 0, len(rawHosts))
 	for _, raw := range rawHosts {
 		h := Host{User: inv.Vars.User, Port: inv.Vars.Port, Key: inv.Vars.Key,
-			Connection: inv.Vars.Connection, Password: inv.Vars.Password}
+			Connection: inv.Vars.Connection, Password: inv.Vars.Password,
+			WinRMHTTPS: inv.Vars.WinRMHTTPS}
 		if h.Connection == "" {
 			h.Connection = "ssh"
 		}
@@ -350,10 +354,15 @@ func (inv *Inventory) parseHosts(rawHosts []string) ([]Host, error) {
 			if e.Password != "" {
 				h.Password = e.Password
 			}
+			h.WinRMHTTPS = h.WinRMHTTPS || e.WinRMHTTPS
 		}
-		// WinRM defaults to port 5985 unless a port was given explicitly.
+		// WinRM defaults: 5985 plain, 5986 TLS, unless set explicitly.
 		if h.Connection == "winrm" && h.Port == 22 {
-			h.Port = 5985
+			if h.WinRMHTTPS {
+				h.Port = 5986
+			} else {
+				h.Port = 5985
+			}
 		}
 		if inv.Vars.JumpHost != "" {
 			h.JumpAddr = inv.Vars.JumpHost

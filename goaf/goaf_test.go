@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -663,6 +667,63 @@ vars: {user: root}
 	if h.Port != 5985 {
 		t.Errorf("default winrm port should be 5985, got %d", h.Port)
 	}
+}
+
+func TestInventoryWinRMHTTPS(t *testing.T) {
+	inv, err := parseInventoryBytes([]byte(`groups:
+  win:
+    hosts: [10.0.0.5]
+hosts:
+  10.0.0.5:
+    user: admin
+    connection: winrm
+    winrm_https: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts, err := inv.Resolve("win")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := hosts[0]
+	if !h.WinRMHTTPS || h.Port != 5986 {
+		t.Errorf("bad https host: %+v", h)
+	}
+}
+
+func TestSendNotify(t *testing.T) {
+	var gotBody []byte
+	var gotCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	sendNotify(srv.URL, "always", "adhoc", "web", 3, 3, 1, 0)
+	if gotCT != "application/json" {
+		t.Errorf("content-type %q", gotCT)
+	}
+	var p notifyPayload
+	if err := json.Unmarshal(gotBody, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Mode != "adhoc" || p.Hosts != 3 || p.Changed != 1 || p.Failed != 0 || p.Text == "" {
+		t.Errorf("bad payload: %+v", p)
+	}
+	// failure-only filter skips passing runs
+	gotBody = nil
+	sendNotify(srv.URL, "failure", "adhoc", "web", 3, 3, 1, 0)
+	if gotBody != nil {
+		t.Error("failure-only should skip passing runs")
+	}
+	sendNotify(srv.URL, "failure", "adhoc", "web", 3, 2, 1, 1)
+	if gotBody == nil {
+		t.Error("failure-only should send failing runs")
+	}
+	// bad URL never fails the caller (best effort, just returns)
+	sendNotify("http://127.0.0.1:1/nope", "always", "adhoc", "web", 1, 1, 0, 0)
 }
 
 func TestTagsAllow(t *testing.T) {

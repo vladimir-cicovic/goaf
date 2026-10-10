@@ -957,10 +957,21 @@ Exit code is 2 when drift or errors are found (CI-friendly).
   goaf state forget 5da0019c       # drop by fingerprint prefix
 ```
 
+## Notifications - webhook on run end
+
+POST the run recap as JSON at the end of ad-hoc, playbook and apply runs
+(Slack renders the `text` field).
+
+```bash
+  goaf -i inv.yml --notify-webhook=https://hooks.slack.com/... run site.yml
+  goaf -i inv.yml --notify-webhook=http://127.0.0.1:8080/hook --notify-on=failure run site.yml
+```
+
 ## Audit - who ran what
 
-Every ad-hoc, playbook and apply run appends one JSON line to
-`~/.goaf/audit.log` (time, user, mode, hosts, ok/changed/failed).
+Every ad-hoc, playbook and apply run is stored in SQLite
+`~/.goaf/audit.db` (time, user, mode, hosts, ok/changed/failed).
+A legacy `audit.log` (JSONL) is imported automatically on first use.
 
 ```bash
   goaf audit        # last 20 runs
@@ -1029,6 +1040,20 @@ Ready-to-run examples (group `win` in inventory):
   goaf -i inv-win.yml run examples/playbook/windows-notepad.yml  # start Notepad, verify PID
   goaf -i inv-win.yml run examples/playbook/windows-install.yml  # install 7-Zip via winget
 ```
+
+Windows inventory extras:
+
+```yaml
+hosts:
+  192.168.1.30:
+    user: admin
+    connection: winrm
+    password: s3cret
+    winrm_https: true     # TLS on 5986 (self-signed certs accepted)
+```
+
+External `.ps1` modules also run over WinRM (params as `$env:GOAF_P_*`);
+POSIX-shell external modules stay Linux-only.
 
 ## Output - values printed at play end
 

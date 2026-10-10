@@ -76,6 +76,14 @@ func main() {
 			askVaultPass = true
 		case "ask-winrm-pass":
 			winrmAskPass = true
+		case "notify-webhook":
+			if hasVal {
+				notifyURL = val
+			}
+		case "notify-on":
+			if hasVal {
+				notifyOn = val
+			}
 		case "tags":
 			if hasVal {
 				tags = append(tags, splitComma(val)...)
@@ -354,6 +362,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "report error: %v\n", err)
 			}
 		}
+		sendNotify(notifyURL, notifyOn, "playbook", args[1], len(report.Hosts),
+			report.Summary.Ok, report.Summary.Changed, report.Summary.Failed)
 		appendAudit(auditRecord{
 			Mode: "playbook", Playbook: args[1], Hosts: len(report.Hosts),
 			Ok: report.Summary.Ok, Changed: report.Summary.Changed,
@@ -467,6 +477,7 @@ func main() {
 			}
 		}
 	}
+	sendNotify(notifyURL, notifyOn, "adhoc", *target, total, passed+changed, changed, failed)
 	appendAudit(auditRecord{
 		Mode: "adhoc", Target: *target, Hosts: total,
 		Ok: passed + changed, Changed: changed, Failed: failed,
@@ -821,6 +832,8 @@ func runApply(planPath string, parallel int, forceCheck bool, reportPath string,
 			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
 		}
 	}
+	sendNotify(notifyURL, notifyOn, "apply", plan.PlaybookName, len(report.Hosts),
+		report.Summary.Ok, report.Summary.Changed, report.Summary.Failed)
 	appendAudit(auditRecord{
 		Mode: "apply", Playbook: plan.PlaybookName + " < " + planPath,
 		Hosts: len(report.Hosts), Ok: report.Summary.Ok,
@@ -1019,6 +1032,8 @@ func usage() {
 	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
 	fmt.Println("  --ask-winrm-pass          prompt for the WinRM password (or GOAF_WINRM_PASSWORD)")
+	fmt.Println("  --notify-webhook=<url>  POST run recap JSON at end (Slack-compatible)")
+	fmt.Println("  --notify-on=<m>         always (default) or failure")
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
 	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("  --confirm          ask [y/N] before applying a playbook run")
