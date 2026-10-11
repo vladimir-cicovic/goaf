@@ -233,7 +233,19 @@ func main() {
 	// modules: list registered (builtin + external) modules
 	if args[0] == "modules" {
 		for _, n := range listModuleNames() {
-			fmt.Println(n)
+			if meta, ok := extModuleMetas[n]; ok && (meta.Version != "" || meta.Description != "") {
+				ver := meta.Version
+				if ver == "" {
+					ver = "?"
+				}
+				desc := meta.Description
+				if desc != "" {
+					desc = " - " + desc
+				}
+				fmt.Printf("%-24s %s%s\n", n, ver, desc)
+			} else {
+				fmt.Println(n)
+			}
 		}
 		return
 	}
@@ -249,13 +261,20 @@ func main() {
 		os.Exit(runDrift(*invPath, becomeMode, *parallel, fix))
 	}
 
-	// state: list or forget recorded entries
+	// state: list or forget recorded entries (scoped by -i inventory).
 	if args[0] == "state" {
 		if len(args) < 2 || (args[1] != "list" && args[1] != "forget") {
 			fmt.Fprintln(os.Stderr, "usage: goaf state list [host] | goaf state forget <host|fingerprint-prefix>")
 			os.Exit(1)
 		}
-		entries := loadState()
+		var inv *Inventory
+		if loaded, err := LoadInventory(*invPath); err == nil {
+			inv = loaded
+		} else if invExplicit {
+			fmt.Fprintf(os.Stderr, "error loading inventory: %v\n", err)
+			os.Exit(1)
+		}
+		entries := loadStateFor(inv)
 		if args[1] == "list" {
 			filter := ""
 			if len(args) > 2 {
@@ -283,7 +302,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: goaf state forget <host|fingerprint-prefix>")
 			os.Exit(1)
 		}
-		if n := forgetState(args[2]); n > 0 {
+		if n := forgetState(inv, args[2]); n > 0 {
 			fmt.Printf("forgot %d %s\n", n, map[bool]string{true: "entry", false: "entries"}[n == 1])
 		} else {
 			fmt.Printf("nothing matched %q\n", args[2])
@@ -509,7 +528,7 @@ func main() {
 			for _, r := range results {
 				if r.Changed && r.Err == nil {
 					if h, ok := byLabel[r.Host]; ok {
-						recordState(h, "ad-hoc", args[0], params, r.Output)
+						recordState(inv, h, "ad-hoc", args[0], params, r.Output)
 					}
 				}
 			}

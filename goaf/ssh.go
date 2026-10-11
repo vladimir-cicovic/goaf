@@ -26,18 +26,21 @@ type Remote interface {
 	Close()
 	DisplayHost() string
 	SetBecome(bool)
+	SetBecomeUser(user, method string)
 }
 
 // Session represents a single SSH connection to one host.
 type Session struct {
-	Host       string // "addr" or "addr:port" for display
-	Become     bool   // run commands with sudo when true
-	client     *ssh.Client
-	jumpClient *ssh.Client // non-nil when tunnelled through a jump host
-	addr       string      // connection parameters, kept for waitForSSH
-	port       int
-	user       string
-	keyPath    string
+	Host         string // "addr" or "addr:port" for display
+	Become       bool   // run commands privileged when true
+	BecomeUser   string // target user (default root)
+	BecomeMethod string // "sudo" (default) or "su"
+	client       *ssh.Client
+	jumpClient   *ssh.Client // non-nil when tunnelled through a jump host
+	addr         string      // connection parameters, kept for waitForSSH
+	port         int
+	user         string
+	keyPath      string
 }
 
 // DisplayHost implements Remote.
@@ -45,6 +48,12 @@ func (s *Session) DisplayHost() string { return s.Host }
 
 // SetBecome implements Remote.
 func (s *Session) SetBecome(b bool) { s.Become = b }
+
+// SetBecomeUser implements Remote.
+func (s *Session) SetBecomeUser(user, method string) {
+	s.BecomeUser = user
+	s.BecomeMethod = method
+}
 
 // authMethods collects available authentication methods.
 // Priority: 1) SSH agent, 2) keyPath if set, 3) ~/.ssh/id_ed25519 and ~/.ssh/id_rsa.
@@ -196,12 +205,12 @@ func (s *Session) Run(cmd string) (string, error) {
 	defer sess.Close()
 
 	if s.Become {
-		if becomePassword != "" {
-			sess.Stdin = strings.NewReader(becomePassword + "\n")
-			cmd = "sudo -S -p '' sh -c " + shQuote(cmd)
-		} else {
-			cmd = "sudo -n sh -c " + shQuote(cmd)
-		}
+		cmd = s.privilegeWrap(cmd)
+	}
+
+	// Password-fed sudo needs stdin before the command runs.
+	if s.Become && becomePassword != "" && s.BecomeMethod != "su" {
+		sess.Stdin = strings.NewReader(becomePassword + "\n")
 	}
 
 	out, err := sess.CombinedOutput(cmd)
@@ -210,6 +219,29 @@ func (s *Session) Run(cmd string) (string, error) {
 		return string(out), fmt.Errorf("sudo authentication failed (wrong become password?)")
 	}
 	return string(out), err
+}
+
+// privilegeWrap wraps a command for become: sudo (default, optional -u and
+// password-fed -S) or su. Unknown methods are rejected.
+func (s *Session) privilegeWrap(cmd string) string {
+	user := s.BecomeUser
+	if user == "" {
+		user = "root"
+	}
+	if s.BecomeMethod == "" || s.BecomeMethod == "sudo" {
+		inner := "sh -c " + shQuote(cmd)
+		if becomePassword != "" {
+			return "sudo -S -p '' -u " + shQuote(user) + " " + inner
+		}
+		return "sudo -n -u " + shQuote(user) + " " + inner
+	}
+	if s.BecomeMethod == "su" {
+		// su reads passwords from the terminal, never stdin: password
+		// sudo is unsupported, so this only works passwordless (root or
+		// same-user setups).
+		return "su " + shQuote(user) + " -c " + shQuote(cmd)
+	}
+	return cmd
 }
 
 // Upload copies a local file to a remote path via SFTP.

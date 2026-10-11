@@ -25,6 +25,9 @@ type Play struct {
 	// fail (nil = no limit). AnyErrorsFatal aborts on the first failure.
 	MaxFailPct     *int `yaml:"-"`
 	AnyErrorsFatal bool `yaml:"-"`
+	// BecomeUser/BecomeMethod override privilege escalation (default root/sudo).
+	BecomeUser   string `yaml:"-"`
+	BecomeMethod string `yaml:"-"`
 	// VarsPrompt asks for variables at runtime (before tasks).
 	VarsPrompt []PromptSpec `yaml:"-"`
 	// FileDir is the playbook's directory (resolves relative includes).
@@ -71,6 +74,9 @@ type PlayTask struct {
 	CheckMode         *bool             // override global check mode for this task
 	Listen            []string          // handler topics: notify any of these triggers it
 	IgnoreUnreachable bool              // unreachable hosts are skipped, not failed
+	BecomeUser        string            // privilege target user (default root)
+	BecomeMethod      string            // sudo (default) or su
+	Become            *bool             // override play/CLI become for this task
 }
 
 var knownModuleNames = []string{
@@ -115,6 +121,8 @@ type rawPlay struct {
 	Strategy          string                   `yaml:"strategy"`
 	GatherSubsets     interface{}              `yaml:"gather_subset"`
 	IgnoreUnreachable *bool                    `yaml:"ignore_unreachable"`
+	BecomeUser        string                   `yaml:"become_user"`
+	BecomeMethod      string                   `yaml:"become_method"`
 	Environment       map[string]interface{}   `yaml:"environment"`
 }
 
@@ -218,6 +226,9 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 	if rp.Strategy != "" && rp.Strategy != "linear" && rp.Strategy != "free" {
 		return Play{}, fmt.Errorf("play %q: unknown strategy %q (want linear|free)", rp.Name, rp.Strategy)
 	}
+	if rp.BecomeMethod != "" && rp.BecomeMethod != "sudo" && rp.BecomeMethod != "su" {
+		return Play{}, fmt.Errorf("play %q: unknown become_method %q (want sudo|su)", rp.Name, rp.BecomeMethod)
+	}
 	subsets, err := parseGatherSubsets(rp.Name, rp.GatherSubsets)
 	if err != nil {
 		return Play{}, err
@@ -271,6 +282,8 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 		Environment:       playEnv,
 		GatherSubsets:     subsets,
 		IgnoreUnreachable: ignoreUnreachable,
+		BecomeUser:        rp.BecomeUser,
+		BecomeMethod:      rp.BecomeMethod,
 	}, nil
 }
 
@@ -605,6 +618,16 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 		}
 	}
 	delegateTo, _ := raw["delegate_to"].(string)
+	becomeUser, _ := raw["become_user"].(string)
+	becomeMethod, _ := raw["become_method"].(string)
+	if becomeMethod != "" && becomeMethod != "sudo" && becomeMethod != "su" {
+		return PlayTask{}, fmt.Errorf("task %q: unknown become_method %q (want sudo|su)", name, becomeMethod)
+	}
+	var become *bool
+	if v, ok := raw["become"]; ok {
+		b := fmt.Sprintf("%v", v) == "true"
+		become = &b
+	}
 	retries, delay, throttle := 0, 0, 0
 	if v, ok := raw["retries"]; ok {
 		fmt.Sscanf(fmt.Sprintf("%v", v), "%d", &retries)
@@ -752,6 +775,9 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 			Environment:       env,
 			CheckMode:         checkMode,
 			Listen:            listen,
+			BecomeUser:        becomeUser,
+			BecomeMethod:      becomeMethod,
+			Become:            become,
 		}, nil
 	}
 	return PlayTask{}, fmt.Errorf("task %q: no known module key found (expected one of: %s)",

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -80,6 +81,7 @@ type HostEntry struct {
 // the cross-play dedup once, so later plays can reach them via new groups.
 type Inventory struct {
 	mu           sync.Mutex
+	invPath      string               // source file (absolute when possible), for state scoping
 	Groups       map[string]Group     `yaml:"groups"`
 	Hosts        map[string]HostEntry `yaml:"hosts"`
 	dynamicHosts map[string]bool
@@ -150,16 +152,39 @@ func LoadInventory(path string) (*Inventory, error) {
 	// stdout as inventory YAML/JSON. An existing non-YAML executable file
 	// (script) is executed the same way.
 	if strings.HasPrefix(path, "exec:") {
-		return loadInventoryExec(strings.TrimPrefix(path, "exec:"))
+		inv, err := loadInventoryExec(strings.TrimPrefix(path, "exec:"))
+		if err != nil {
+			return nil, err
+		}
+		inv.invPath = path
+		return inv, nil
 	}
 	if st, err := os.Stat(path); err == nil && !st.IsDir() && !isInventoryFile(path) && isExecutableFile(path) {
-		return loadInventoryExec(scriptCommand(path))
+		inv, err := loadInventoryExec(scriptCommand(path))
+		if err != nil {
+			return nil, err
+		}
+		inv.invPath = absPath(path)
+		return inv, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return parseInventoryBytes(data)
+	inv, err := parseInventoryBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	inv.invPath = absPath(path)
+	return inv, nil
+}
+
+// absPath returns the absolute form of p (best effort).
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // loadInventoryExec runs a command and parses its stdout as inventory.

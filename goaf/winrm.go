@@ -31,6 +31,9 @@ func (s *WinRMSession) DisplayHost() string { return s.Host }
 // SetBecome implements Remote (accepted, ignored on Windows).
 func (s *WinRMSession) SetBecome(bool) {}
 
+// SetBecomeUser implements Remote (accepted, ignored on Windows).
+func (s *WinRMSession) SetBecomeUser(string, string) {}
+
 // psQuote quotes a string for PowerShell single-quoted literals.
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"

@@ -85,6 +85,7 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 	if opts.Parallelism < 1 {
 		opts.Parallelism = 1
 	}
+	defer closePool()
 	report := newReport("playbook", opts.CheckMode)
 	stats := make(map[string]*hostStats)
 	var hostOrder []string
@@ -634,7 +635,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			default:
 				if r.Changed && r.Err == nil && !c.opts.CheckMode && task.DelegateTo == "" {
 					if expanded, err := c.expandTask(task, h, item); err == nil {
-						recordState(h, c.play.Name, task.Module, expanded, r.Output)
+						recordState(c.inv, h, c.play.Name, task.Module, expanded, r.Output)
 					}
 				}
 			}
@@ -669,8 +670,23 @@ func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) [
 			check = *task.CheckMode
 		}
 		sessions := wrapEnv(c.sessions, taskEnv(c.play, task))
-		return runOnSessions(taskHosts, mkMod, sessions, c.connErrs, c.play.Become || c.opts.Become, check, task.Throttle)
+		bu, bm := c.play.BecomeUser, c.play.BecomeMethod
+		if task.BecomeUser != "" {
+			bu = task.BecomeUser
+		}
+		if task.BecomeMethod != "" {
+			bm = task.BecomeMethod
+		}
+		return runOnSessions(taskHosts, mkMod, sessions, c.connErrs, c.effBecome(task), check, task.Throttle, bu, bm)
 	}
+}
+
+// effBecome resolves privilege escalation: task become wins over play/CLI.
+func (c *listRunner) effBecome(task PlayTask) bool {
+	if task.Become != nil {
+		return *task.Become
+	}
+	return c.play.Become || c.opts.Become
 }
 
 // needsRetry reports whether a judged result needs another attempt:
@@ -1004,7 +1020,14 @@ func (c *listRunner) flushHandlers() int {
 				handlerHosts = append(handlerHosts, h)
 			}
 		}
-		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode, 0)
+		bu, bm := c.play.BecomeUser, c.play.BecomeMethod
+		if handler.BecomeUser != "" {
+			bu = handler.BecomeUser
+		}
+		if handler.BecomeMethod != "" {
+			bm = handler.BecomeMethod
+		}
+		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.effBecome(handler), c.opts.CheckMode, 0, bu, bm)
 		for _, r := range results {
 			s := c.statFor(r.Host)
 			c.addFailed(applyResult(r, s))

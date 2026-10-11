@@ -64,6 +64,11 @@ type EnvSession struct {
 	env map[string]string
 }
 
+// SetBecomeUser forwards to the wrapped session.
+func (s EnvSession) SetBecomeUser(user, method string) {
+	s.Remote.SetBecomeUser(user, method)
+}
+
 // taskEnv merges play and task environment (task wins).
 func taskEnv(play Play, task PlayTask) map[string]string {
 	if len(play.Environment) == 0 && len(task.Environment) == 0 {
@@ -158,7 +163,7 @@ func connectAll(hosts []Host, parallelism int) (map[string]Remote, map[string]er
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			sess, err := dialHost(host)
+			sess, err := dialPooled(host)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -175,14 +180,92 @@ func connectAll(hosts []Host, parallelism int) (map[string]Remote, map[string]er
 
 // closeAll closes every session in the map.
 func closeAll(sessions map[string]Remote) {
-	for _, sess := range sessions {
+}
+
+// connPool keeps one connection per host for the whole run (multiplexing:
+// SSH channels share the transport instead of re-handshaking per play).
+// WinRM is request-based; its entries are lightweight markers.
+var connPool = struct {
+	sync.Mutex
+	sessions map[string]Remote
+	params   map[string]Host
+}{sessions: map[string]Remote{}, params: map[string]Host{}}
+
+// dialPooled returns the pooled connection for a host, dialing (and caching)
+// on first use. A pooled entry is reused only when the connection parameters
+// match; dead sessions are re-dialed once.
+func dialPooled(h Host) (Remote, error) {
+	label := hostLabel(h)
+	connPool.Lock()
+	sess, ok := connPool.sessions[label]
+	prev, same := connPool.params[label]
+	var stale Remote
+	if ok && same {
+		if sameHostParams(prev, h) {
+			connPool.Unlock()
+			if aliveSession(sess) {
+				return sess, nil
+			}
+			stale = sess
+		} else {
+			// Parameters changed mid-run: drop the stale entry.
+			stale = sess
+			delete(connPool.sessions, label)
+			delete(connPool.params, label)
+			connPool.Unlock()
+		}
+	} else {
+		connPool.Unlock()
+	}
+	if stale != nil {
+		stale.Close()
+	}
+	sess, err := dialHost(h)
+	if err != nil {
+		return nil, err
+	}
+	connPool.Lock()
+	connPool.sessions[label] = sess
+	connPool.params[label] = h
+	connPool.Unlock()
+	return sess, nil
+}
+
+// sameHostParams reports whether cached connection parameters still apply.
+func sameHostParams(a, b Host) bool {
+	return a.Addr == b.Addr && a.Port == b.Port && a.User == b.User &&
+		a.Key == b.Key && a.Connection == b.Connection &&
+		a.JumpAddr == b.JumpAddr && a.JumpUser == b.JumpUser && a.JumpPort == b.JumpPort
+}
+
+// aliveSession probes an SSH transport; WinRM markers are always "alive"
+// (each request dials fresh HTTP).
+func aliveSession(s Remote) bool {
+	ss, ok := s.(*Session)
+	if !ok {
+		return true
+	}
+	if ss.client == nil {
+		return false
+	}
+	_, _, err := ss.client.SendRequest("keepalive@goaf", true, nil)
+	return err == nil
+}
+
+// closePool closes every pooled connection (end of run).
+func closePool() {
+	connPool.Lock()
+	defer connPool.Unlock()
+	for _, sess := range connPool.sessions {
 		sess.Close()
 	}
+	connPool.sessions = map[string]Remote{}
+	connPool.params = map[string]Host{}
 }
 
 // runOnSessions executes a per-host built module on existing sessions in
 // parallel. Hosts without a session report the stored connection error.
-func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]Remote, connErrs map[string]error, become, checkMode bool, throttle int) []Result {
+func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]Remote, connErrs map[string]error, become, checkMode bool, throttle int, becomeUser, becomeMethod string) []Result {
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -225,6 +308,7 @@ func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions ma
 				return
 			}
 			sess.SetBecome(become)
+			sess.SetBecomeUser(becomeUser, becomeMethod)
 			res := RunModule(sess.DisplayHost(), sess, mod, checkMode)
 
 			mu.Lock()
