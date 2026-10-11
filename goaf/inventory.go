@@ -76,21 +76,58 @@ type HostEntry struct {
 
 // Inventory describes server groups, per-host entries and global variables.
 // mu guards runtime mutation (group_by/add_host); load/resolve are single-threaded.
+// dynamicHosts marks hosts added mid-run (group_by/add_host): they bypass
+// the cross-play dedup once, so later plays can reach them via new groups.
 type Inventory struct {
-	mu     sync.Mutex
-	Groups map[string]Group     `yaml:"groups"`
-	Hosts  map[string]HostEntry `yaml:"hosts"`
-	Vars   struct {
+	mu           sync.Mutex
+	Groups       map[string]Group     `yaml:"groups"`
+	Hosts        map[string]HostEntry `yaml:"hosts"`
+	dynamicHosts map[string]bool
+	Vars         struct {
 		User       string `yaml:"user"`
 		Port       int    `yaml:"port"`
 		Key        string `yaml:"key"`
 		JumpHost   string `yaml:"jump_host"`
 		JumpPort   int    `yaml:"jump_port"`
 		JumpUser   string `yaml:"jump_user"`
-		Connection string `yaml:"connection"` // default connection for all hosts
-		Password   string `yaml:"password"`   // default WinRM password (vault allowed)
+		Connection string `yaml:"connection"`
+		Password   string `yaml:"password"`
 		WinRMHTTPS bool   `yaml:"winrm_https"`
 	} `yaml:"vars"`
+}
+
+// markDynamic flags a host label as added mid-run.
+func (inv *Inventory) markDynamic(label string) {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if inv.dynamicHosts == nil {
+		inv.dynamicHosts = map[string]bool{}
+	}
+	inv.dynamicHosts[label] = true
+}
+
+// takeDynamic reports and clears the mid-run flag for a label.
+func (inv *Inventory) takeDynamic(label string) bool {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	return inv.takeDynamicLocked(label)
+}
+
+// takeDynamicLocked is takeDynamic for callers already holding mu.
+func (inv *Inventory) takeDynamicLocked(label string) bool {
+	if inv.dynamicHosts[label] {
+		delete(inv.dynamicHosts, label)
+		return true
+	}
+	return false
+}
+
+// markDynamicLocked flags a label; caller must hold mu.
+func (inv *Inventory) markDynamicLocked(label string) {
+	if inv.dynamicHosts == nil {
+		inv.dynamicHosts = map[string]bool{}
+	}
+	inv.dynamicHosts[label] = true
 }
 
 // Host is a resolved target with all connection parameters.

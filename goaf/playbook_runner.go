@@ -136,10 +136,12 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 		}
 
 		// Split into fresh (not yet processed) and skipped.
+		// Hosts added mid-run (group_by/add_host) bypass dedup once so
+		// later plays can reach them via their new groups.
 		var fresh []Host
 		for _, h := range hosts {
-			if processed[hostLabel(h)] {
-				label := hostLabel(h)
+			label := hostLabel(h)
+			if processed[label] && !inv.takeDynamic(label) {
 				activeEmitter.TaskSkipped(label, "already processed in a previous play")
 				stats[label].skipped++
 			} else {
@@ -800,11 +802,13 @@ func (c *listRunner) runGroupBy(label string, h Host, task PlayTask, vars map[st
 	g := c.inv.Groups[group]
 	for _, existing := range g.Hosts {
 		if existing == raw {
+			c.inv.markDynamicLocked(label)
 			return Result{Host: label, Output: "already in group " + group}
 		}
 	}
 	g.Hosts = append(g.Hosts, raw)
 	c.inv.Groups[group] = g
+	c.inv.markDynamicLocked(label)
 	return Result{Host: label, Output: "added to group " + group}
 }
 
@@ -875,6 +879,9 @@ func (c *listRunner) runAddHost(label string, task PlayTask, vars map[string]str
 		c.inv.Hosts = map[string]HostEntry{}
 	}
 	c.inv.Hosts[name] = entry
+	// Brand-new hosts are always reachable later (never pre-processed),
+	// but flag them too: a re-added known host bypasses dedup once.
+	c.inv.markDynamicLocked(name)
 	return Result{Host: label, Output: "added host " + name}
 }
 
