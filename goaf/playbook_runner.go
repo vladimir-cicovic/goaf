@@ -217,7 +217,7 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 	var allFacts map[string]Facts
 	if play.GatherFacts {
 		activeEmitter.GatheringFacts()
-		allFacts = gatherFactsOn(sessions, batch, opts.FactsTTL, opts.FlushCache)
+		allFacts = gatherFactsOn(sessions, batch, opts.FactsTTL, opts.FlushCache, play.GatherSubsets)
 		for _, h := range batch {
 			activeEmitter.FactsGathered(hostLabel(h))
 		}
@@ -542,6 +542,18 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			if c.inScope(h, skip, only) && !scoped[hostLabel(h)] {
 				c.skipHost(h, "when condition false")
 			}
+		}
+		// Unreachable hosts are skipped (not failed) with ignore_unreachable.
+		if task.IgnoreUnreachable || c.play.IgnoreUnreachable {
+			var reachable []Host
+			for _, h := range taskHosts {
+				if _, bad := c.connErrs[hostLabel(h)]; bad {
+					c.skipHost(h, "unreachable (ignored)")
+				} else {
+					reachable = append(reachable, h)
+				}
+			}
+			taskHosts = reachable
 		}
 		if len(taskHosts) == 0 {
 			continue
@@ -1172,8 +1184,8 @@ func splitBatches(hosts []Host, serial int) [][]Host {
 // gatherFactsOn collects facts over existing sessions in parallel.
 // Hosts without a session receive an empty Facts map so tasks can still run.
 // Fresh-enough cache entries (ttlSec, 0 = disabled) are reused instead of SSH;
-// flush drops the cache first.
-func gatherFactsOn(sessions map[string]Remote, hosts []Host, ttlSec int, flush bool) map[string]Facts {
+// flush drops the cache first. Subsets limit collected fact groups.
+func gatherFactsOn(sessions map[string]Remote, hosts []Host, ttlSec int, flush bool, subsets []string) map[string]Facts {
 	if flush {
 		clearFactsCache()
 	}
@@ -1210,7 +1222,7 @@ func gatherFactsOn(sessions map[string]Remote, hosts []Host, ttlSec int, flush b
 				cacheMu.Unlock()
 				if ok && now-ce.GatheredAt < int64(ttlSec) && len(ce.Facts) > 0 {
 					cacheMu.Lock()
-					result[label] = ce.Facts
+					result[label] = filterFacts(ce.Facts, subsets)
 					cacheMu.Unlock()
 					return
 				}
@@ -1220,14 +1232,22 @@ func gatherFactsOn(sessions map[string]Remote, hosts []Host, ttlSec int, flush b
 			mu.Unlock()
 			facts := Facts{}
 			if ok {
-				facts = gatherOne(sess)
+				facts = gatherOneSubsets(sess, subsets)
 			}
 			mu.Lock()
 			result[label] = facts
 			mu.Unlock()
 			if ttlSec > 0 && len(facts) > 0 {
 				cacheMu.Lock()
-				cache[label] = cachedFacts{Facts: facts, GatheredAt: now}
+				ce := cache[label]
+				if ce.Facts == nil {
+					ce.Facts = Facts{}
+				}
+				for k, v := range facts {
+					ce.Facts[k] = v
+				}
+				ce.GatheredAt = now
+				cache[label] = ce
 				dirty = true
 				cacheMu.Unlock()
 			}
