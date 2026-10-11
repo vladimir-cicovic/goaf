@@ -25,12 +25,17 @@ type Play struct {
 	// fail (nil = no limit). AnyErrorsFatal aborts on the first failure.
 	MaxFailPct     *int `yaml:"-"`
 	AnyErrorsFatal bool `yaml:"-"`
+	// VarsPrompt asks for variables at runtime (before tasks).
+	VarsPrompt []PromptSpec `yaml:"-"`
 	// FileDir is the playbook's directory (resolves relative includes).
 	// RolesPath is the base directory for roles (flag --roles-path).
 	FileDir   string `yaml:"-"`
 	RolesPath string `yaml:"-"`
 	// Outputs are evaluated once per play (first host's vars) and printed.
 	Outputs map[string]string `yaml:"output"`
+	// Strategy "free" runs each host through all tasks independently
+	// (default "linear": task barrier across hosts).
+	Strategy string `yaml:"strategy"`
 }
 
 type PlayTask struct {
@@ -54,6 +59,7 @@ type PlayTask struct {
 	Delay       int        // seconds between retries
 	Until       string     // Go template over vars+facts+result; retry until true
 	RoleDir     string     // set for tasks from a role (resolves files//templates/)
+	Throttle    int        // max parallel hosts for this task (0 = play default)
 }
 
 var knownModuleNames = []string{
@@ -63,7 +69,7 @@ var knownModuleNames = []string{
 	"debug", "set_fact", "script", "fetch", "meta",
 	"winget", "git", "get_url", "unarchive", "cron", "sysctl", "mount",
 	"hostname", "timezone", "stat", "slurp", "find", "wait_for", "pause",
-	"assert",
+	"assert", "group_by", "add_host",
 }
 
 func loadPlaybook(path string) ([]Play, error) {
@@ -75,86 +81,168 @@ func loadPlaybook(path string) ([]Play, error) {
 }
 
 func loadPlaybookBytes(data []byte, dir, rolesDir string) ([]Play, error) {
-	var rawPlays []struct {
-		Name        string                   `yaml:"name"`
-		Hosts       string                   `yaml:"hosts"`
-		Become      bool                     `yaml:"become"`
-		Vars        map[string]string        `yaml:"vars"`
-		GatherFacts *bool                    `yaml:"gather_facts"`
-		PreTasks    []map[string]interface{} `yaml:"pre_tasks"`
-		Tasks       []map[string]interface{} `yaml:"tasks"`
-		PostTasks   []map[string]interface{} `yaml:"post_tasks"`
-		Handlers    []map[string]interface{} `yaml:"handlers"`
-		Roles       []interface{}            `yaml:"roles"`
-		MaxFailPct  *int                     `yaml:"max_fail_percentage"`
-		AnyErrors   *bool                    `yaml:"any_errors_fatal"`
-		Outputs     map[string]string        `yaml:"output"`
-	}
+	return loadPlaybookDepth(data, dir, rolesDir, 0)
+}
 
-	if err := yaml.Unmarshal(data, &rawPlays); err != nil {
+// rawPlay mirrors one play for YAML decoding.
+type rawPlay struct {
+	Name        string                   `yaml:"name"`
+	Hosts       string                   `yaml:"hosts"`
+	Become      bool                     `yaml:"become"`
+	Vars        map[string]string        `yaml:"vars"`
+	GatherFacts *bool                    `yaml:"gather_facts"`
+	PreTasks    []map[string]interface{} `yaml:"pre_tasks"`
+	Tasks       []map[string]interface{} `yaml:"tasks"`
+	PostTasks   []map[string]interface{} `yaml:"post_tasks"`
+	Handlers    []map[string]interface{} `yaml:"handlers"`
+	Roles       []interface{}            `yaml:"roles"`
+	MaxFailPct  *int                     `yaml:"max_fail_percentage"`
+	AnyErrors   *bool                    `yaml:"any_errors_fatal"`
+	Outputs     map[string]string        `yaml:"output"`
+	VarsFiles   []string                 `yaml:"vars_files"`
+	VarsPrompt  []interface{}            `yaml:"vars_prompt"`
+	Strategy    string                   `yaml:"strategy"`
+}
+
+func loadPlaybookDepth(data []byte, dir, rolesDir string, depth int) ([]Play, error) {
+	if depth > 10 {
+		return nil, fmt.Errorf("import_playbook nesting too deep (cycle?)")
+	}
+	var rawItems []map[string]interface{}
+	if err := yaml.Unmarshal(data, &rawItems); err != nil {
 		return nil, fmt.Errorf("parsing playbook: %w", err)
 	}
 
-	plays := make([]Play, 0, len(rawPlays))
-	for _, rp := range rawPlays {
-		preTasks, err := parseTasks(rp.PreTasks, dir)
-		if err != nil {
-			return nil, fmt.Errorf("play %q pre_tasks: %w", rp.Name, err)
+	var plays []Play
+	for _, item := range rawItems {
+		// import_playbook splices another file's plays here.
+		if iv, ok := item["import_playbook"]; ok {
+			incFile, ok := iv.(string)
+			if !ok {
+				return nil, fmt.Errorf("import_playbook must be a file path")
+			}
+			resolved, err := resolveInclude(dir, incFile)
+			if err != nil {
+				return nil, err
+			}
+			incData, err := os.ReadFile(resolved)
+			if err != nil {
+				return nil, err
+			}
+			sub, err := loadPlaybookDepth(incData, filepath.Dir(resolved), rolesDir, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			plays = append(plays, sub...)
+			continue
 		}
-		tasks, err := parseTasks(rp.Tasks, dir)
+		var rp rawPlay
+		rawBack, err := yaml.Marshal(item)
 		if err != nil {
-			return nil, fmt.Errorf("play %q: %w", rp.Name, err)
+			return nil, fmt.Errorf("parsing play: %w", err)
 		}
-		postTasks, err := parseTasks(rp.PostTasks, dir)
-		if err != nil {
-			return nil, fmt.Errorf("play %q post_tasks: %w", rp.Name, err)
+		if err := yaml.Unmarshal(rawBack, &rp); err != nil {
+			return nil, fmt.Errorf("parsing play: %w", err)
 		}
-		handlers, err := parseTasks(rp.Handlers, dir)
-		if err != nil {
-			return nil, fmt.Errorf("play %q handlers: %w", rp.Name, err)
-		}
-		// Roles run before tasks; role handlers join play handlers.
-		roleTasks, roleHandlers, roleVars, err := expandRoles(rp.Name, rp.Roles, dir, rolesDir)
+		play, err := buildPlay(rp, dir, rolesDir)
 		if err != nil {
 			return nil, err
 		}
-		tasks = append(roleTasks, tasks...)
-		handlers = append(handlers, roleHandlers...)
-		gatherFacts := true
-		if rp.GatherFacts != nil {
-			gatherFacts = *rp.GatherFacts
-		}
-		// Decrypt $GOAFVAULT play vars up front so {{.var}} references
-		// expand to plaintext. Without a password the envelope is kept
-		// and fails later with a clear error when actually used.
-		vars, err := decryptVarMap(rp.Name, rp.Vars)
-		if err != nil {
-			return nil, err
-		}
-		// Role vars win over play vars (explicit role > playbook).
-		for k, v := range roleVars {
-			vars[k] = v
-		}
-		anyFatal := false
-		if rp.AnyErrors != nil {
-			anyFatal = *rp.AnyErrors
-		}
-		plays = append(plays, Play{
-			Name:           rp.Name,
-			Hosts:          rp.Hosts,
-			Become:         rp.Become,
-			Vars:           vars,
-			PreTasks:       preTasks,
-			Tasks:          tasks,
-			PostTasks:      postTasks,
-			Handlers:       handlers,
-			GatherFacts:    gatherFacts,
-			MaxFailPct:     rp.MaxFailPct,
-			AnyErrorsFatal: anyFatal,
-			Outputs:        rp.Outputs,
-		})
+		plays = append(plays, play)
 	}
 	return plays, nil
+}
+
+// buildPlay constructs one Play from parsed YAML (import_playbook calls it per item).
+func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
+	preTasks, err := parseTasks(rp.PreTasks, dir)
+	if err != nil {
+		return Play{}, fmt.Errorf("play %q pre_tasks: %w", rp.Name, err)
+	}
+	tasks, err := parseTasks(rp.Tasks, dir)
+	if err != nil {
+		return Play{}, fmt.Errorf("play %q: %w", rp.Name, err)
+	}
+	postTasks, err := parseTasks(rp.PostTasks, dir)
+	if err != nil {
+		return Play{}, fmt.Errorf("play %q post_tasks: %w", rp.Name, err)
+	}
+	handlers, err := parseTasks(rp.Handlers, dir)
+	if err != nil {
+		return Play{}, fmt.Errorf("play %q handlers: %w", rp.Name, err)
+	}
+	// Roles run before tasks; role handlers join play handlers.
+	roleTasks, roleHandlers, roleVars, err := expandRoles(rp.Name, rp.Roles, dir, rolesDir)
+	if err != nil {
+		return Play{}, err
+	}
+	tasks = append(roleTasks, tasks...)
+	handlers = append(handlers, roleHandlers...)
+	gatherFacts := true
+	if rp.GatherFacts != nil {
+		gatherFacts = *rp.GatherFacts
+	}
+	// vars_files load under play vars (explicit playbook wins).
+	fileVars := map[string]string{}
+	for _, vf := range rp.VarsFiles {
+		resolved, err := resolveVarsFile(dir, vf)
+		if err != nil {
+			return Play{}, err
+		}
+		one, err := loadVarsFile(rp.Name, resolved)
+		if err != nil {
+			return Play{}, err
+		}
+		for k, v := range one {
+			fileVars[k] = v
+		}
+	}
+	prompts, err := parseVarsPrompt(rp.Name, rp.VarsPrompt)
+	if err != nil {
+		return Play{}, err
+	}
+	if rp.Strategy != "" && rp.Strategy != "linear" && rp.Strategy != "free" {
+		return Play{}, fmt.Errorf("play %q: unknown strategy %q (want linear|free)", rp.Name, rp.Strategy)
+	}
+	// Decrypt $GOAFVAULT play vars up front so {{.var}} references
+	// expand to plaintext. Without a password the envelope is kept
+	// and fails later with a clear error when actually used.
+	vars, err := decryptVarMap(rp.Name, rp.Vars)
+	if err != nil {
+		return Play{}, err
+	}
+	if vars == nil {
+		vars = map[string]string{}
+	}
+	for k, v := range fileVars {
+		if _, ok := vars[k]; !ok {
+			vars[k] = v
+		}
+	}
+	// Role vars win over play vars (explicit role > playbook).
+	for k, v := range roleVars {
+		vars[k] = v
+	}
+	anyFatal := false
+	if rp.AnyErrors != nil {
+		anyFatal = *rp.AnyErrors
+	}
+	return Play{
+		Name:           rp.Name,
+		Hosts:          rp.Hosts,
+		Become:         rp.Become,
+		Vars:           vars,
+		PreTasks:       preTasks,
+		Tasks:          tasks,
+		PostTasks:      postTasks,
+		Handlers:       handlers,
+		GatherFacts:    gatherFacts,
+		MaxFailPct:     rp.MaxFailPct,
+		AnyErrorsFatal: anyFatal,
+		Outputs:        rp.Outputs,
+		VarsPrompt:     prompts,
+		Strategy:       rp.Strategy,
+	}, nil
 }
 
 func parseTasks(rawTasks []map[string]interface{}, baseDir string) ([]PlayTask, error) {
@@ -260,6 +348,25 @@ func resolveRoleDir(name, playDir, rolesDir string) (string, error) {
 	return "", fmt.Errorf("role %q not found (looked in %s)", name, strings.Join(candidates, ", "))
 }
 
+// loadRoleDeps reads roles/<name>/meta/main.yml dependencies
+// (list of role entries, same forms as play roles:).
+func loadRoleDeps(roleDir string) ([]interface{}, error) {
+	data, err := os.ReadFile(filepath.Join(roleDir, "meta", "main.yml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var doc struct {
+		Dependencies []interface{} `yaml:"dependencies"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", filepath.Join(roleDir, "meta", "main.yml"), err)
+	}
+	return doc.Dependencies, nil
+}
+
 // loadRoleFileMap reads an optional role map file (vars/main.yml,
 // defaults/main.yml); missing file means empty map.
 func loadRoleFileMap(roleDir, file string) (map[string]string, error) {
@@ -294,7 +401,12 @@ func markRoleDir(tasks []PlayTask, dir string) {
 // expandRoles loads roles for a play: role tasks run before play tasks,
 // role handlers join play handlers, role vars win over play vars.
 // Entry forms: "name" or {role: name, key: value, ...} (extra keys = vars).
+// roles/<name>/meta/main.yml may list dependencies (run first, no cycles).
 func expandRoles(playName string, entries []interface{}, playDir, rolesDir string) (tasks, handlers []PlayTask, vars map[string]string, err error) {
+	return expandRolesSeen(playName, entries, playDir, rolesDir, map[string]bool{})
+}
+
+func expandRolesSeen(playName string, entries []interface{}, playDir, rolesDir string, seen map[string]bool) (tasks, handlers []PlayTask, vars map[string]string, err error) {
 	vars = map[string]string{}
 	for _, e := range entries {
 		name := ""
@@ -320,6 +432,25 @@ func expandRoles(playName string, entries []interface{}, playDir, rolesDir strin
 		dir, rerr := resolveRoleDir(name, playDir, rolesDir)
 		if rerr != nil {
 			return nil, nil, nil, fmt.Errorf("play %q: %w", playName, rerr)
+		}
+		// Dependencies first (skipped when already expanded: no cycles).
+		if !seen[name] {
+			seen[name] = true
+			deps, derr := loadRoleDeps(dir)
+			if derr != nil {
+				return nil, nil, nil, fmt.Errorf("play %q: %w", playName, derr)
+			}
+			if len(deps) > 0 {
+				dt, dh, dv, derr := expandRolesSeen(playName, deps, playDir, rolesDir, seen)
+				if derr != nil {
+					return nil, nil, nil, derr
+				}
+				tasks = append(tasks, dt...)
+				handlers = append(handlers, dh...)
+				for k, v := range dv {
+					vars[k] = v
+				}
+			}
 		}
 		rawList, rerr := parseTaskListFile(filepath.Join(dir, "tasks", "main.yml"))
 		if rerr != nil {
@@ -415,11 +546,17 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 		runOnce = fmt.Sprintf("%v", v) == "true"
 	}
 	delegateTo, _ := raw["delegate_to"].(string)
-	retries, delay := 0, 0
+	retries, delay, throttle := 0, 0, 0
 	if v, ok := raw["retries"]; ok {
 		fmt.Sscanf(fmt.Sprintf("%v", v), "%d", &retries)
 		if retries < 0 {
 			retries = 0
+		}
+	}
+	if v, ok := raw["throttle"]; ok {
+		fmt.Sscanf(fmt.Sprintf("%v", v), "%d", &throttle)
+		if throttle < 0 {
+			throttle = 0
 		}
 	}
 	if v, ok := raw["delay"]; ok {
@@ -550,6 +687,7 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 			Retries:     retries,
 			Delay:       delay,
 			Until:       until,
+			Throttle:    throttle,
 		}, nil
 	}
 	return PlayTask{}, fmt.Errorf("task %q: no known module key found (expected one of: %s)",
@@ -717,6 +855,74 @@ func setupWorkspace(name string) error {
 	}
 	workspaceVars["workspace"] = name
 	return nil
+}
+
+// PromptSpec is one vars_prompt entry.
+type PromptSpec struct {
+	Name    string
+	Prompt  string
+	Private bool
+	Default string
+}
+
+// parseVarsPrompt parses vars_prompt entries (list of maps with name).
+func parseVarsPrompt(playName string, raw []interface{}) ([]PromptSpec, error) {
+	var out []PromptSpec
+	for _, item := range raw {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("play %q: vars_prompt entries must be maps", playName)
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			return nil, fmt.Errorf("play %q: vars_prompt entry needs 'name'", playName)
+		}
+		prompt, _ := m["prompt"].(string)
+		if prompt == "" {
+			prompt = "Enter " + name + ":"
+		}
+		spec := PromptSpec{Name: name, Prompt: prompt}
+		if v, ok := m["private"]; ok {
+			spec.Private = fmt.Sprintf("%v", v) == "true"
+		}
+		if v, ok := m["default"]; ok {
+			spec.Default = fmt.Sprintf("%v", v)
+		}
+		out = append(out, spec)
+	}
+	return out, nil
+}
+
+// loadVarsFile reads a vars file (flat map or {vars:} form), vault-decrypted.
+func loadVarsFile(playName, path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("play %q vars_files: %w", playName, err)
+	}
+	if nested, ok := rawVarsKey(data); ok {
+		return decryptVarMap(playName+" vars_files", nested)
+	}
+	flat := map[string]string{}
+	if err := yaml.Unmarshal(data, &flat); err != nil {
+		return nil, fmt.Errorf("play %q vars_files %s: %w", playName, path, err)
+	}
+	return decryptVarMap(playName+" vars_files", flat)
+}
+
+// resolveVarsFile finds a vars file: absolute, relative to baseDir, then CWD.
+func resolveVarsFile(baseDir, file string) (string, error) {
+	if filepath.IsAbs(file) {
+		if _, err := os.Stat(file); err == nil {
+			return file, nil
+		}
+		return "", fmt.Errorf("vars file not found: %s", file)
+	}
+	for _, cand := range []string{filepath.Join(baseDir, file), file} {
+		if _, err := os.Stat(cand); err == nil {
+			return cand, nil
+		}
+	}
+	return "", fmt.Errorf("vars file not found: %s (looked in %s)", file, baseDir)
 }
 
 // rawVarsKey extracts a top-level "vars:" map when present.

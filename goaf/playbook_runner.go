@@ -1,12 +1,54 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 )
+
+// promptVars asks for play vars_prompt values (merged into play.Vars).
+// Without a terminal each prompt takes its default (or empty) with a notice.
+func promptVars(play *Play) {
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	reader := bufio.NewReader(os.Stdin)
+	for _, spec := range play.VarsPrompt {
+		if !interactive {
+			if spec.Default != "" && play.Vars[spec.Name] == "" {
+				play.Vars[spec.Name] = spec.Default
+			}
+			activeEmitter.Diagnostic(fmt.Sprintf("vars_prompt %q: no terminal, using default", spec.Name))
+			continue
+		}
+		var value string
+		if spec.Private {
+			pw, err := readPassword(spec.Prompt + " ")
+			if err != nil {
+				activeEmitter.Diagnostic(fmt.Sprintf("vars_prompt %q: %v", spec.Name, err))
+				value = spec.Default
+			} else {
+				value = pw
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%s ", spec.Prompt)
+			line, _ := reader.ReadString('\n')
+			value = strings.TrimSpace(line)
+			if value == "" {
+				value = spec.Default
+			}
+		}
+		if play.Vars == nil {
+			play.Vars = map[string]string{}
+		}
+		play.Vars[spec.Name] = value
+	}
+}
 
 type hostStats struct {
 	ok      int
@@ -110,6 +152,11 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 			processed[hostLabel(h)] = true
 		}
 
+		// Prompt for play variables (once per play, only with fresh hosts).
+		if len(play.VarsPrompt) > 0 && len(fresh) > 0 {
+			promptVars(&play)
+		}
+
 		if len(fresh) == 0 {
 			activeEmitter.Diagnostic("(no fresh hosts — play has nothing to do)")
 			continue
@@ -185,16 +232,79 @@ func runBatch(batch []Host, play Play, inv *Inventory, opts RunOptions, stats ma
 		totalFailed: &totalFailed,
 	}
 
-	// pre_tasks, tasks, post_tasks — handlers flush after each section.
-	for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
-		if lr.aborted {
-			break
+	if play.Strategy == "free" {
+		// Free strategy: every host runs all sections independently and in
+		// parallel (no per-task barrier). Output lines may interleave.
+		n, aborted := lr.runFree()
+		totalFailed += n
+		if aborted {
+			lr.aborted = true
 		}
-		lr.runList(section, nil, nil, nil, false)
-		lr.flushHandlers()
+	} else {
+		// pre_tasks, tasks, post_tasks — handlers flush after each section.
+		for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
+			if lr.aborted {
+				break
+			}
+			lr.runList(section, nil, nil, nil, false)
+			lr.flushHandlers()
+		}
 	}
 
 	return totalFailed, lr.aborted, allFacts
+}
+
+// runFree executes all sections per host, hosts in parallel.
+// Each host gets private register/notify state; stats map entries and the
+// inventory are shared (guarded). Returns failures and whether any host aborted.
+func (c *listRunner) runFree() (int, bool) {
+	par := c.opts.Parallelism
+	if par < 1 {
+		par = 1
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, par)
+	var mu sync.Mutex
+	failed, aborted := 0, false
+
+	for _, h := range c.batch {
+		wg.Add(1)
+		go func(h Host) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			label := hostLabel(h)
+			reg := map[string]string{}
+			if m, ok := c.registeredVars[label]; ok {
+				for k, v := range m {
+					reg[k] = v
+				}
+			}
+			var n int
+			sub := &listRunner{
+				batch: []Host{h}, play: c.play, inv: c.inv, opts: c.opts,
+				stats: c.stats, sessions: c.sessions, connErrs: c.connErrs,
+				allFacts:       c.allFacts,
+				registeredVars: map[string]map[string]string{label: reg},
+				notified:       make(map[string]map[string]bool),
+				totalFailed:    &n, batchFailed: map[string]bool{},
+			}
+			for _, section := range [][]PlayTask{c.play.PreTasks, c.play.Tasks, c.play.PostTasks} {
+				if sub.aborted {
+					break
+				}
+				sub.runList(section, nil, nil, nil, false)
+				sub.flushHandlers()
+			}
+			mu.Lock()
+			failed += n
+			aborted = aborted || sub.aborted
+			mu.Unlock()
+		}(h)
+	}
+	wg.Wait()
+	return failed, aborted
 }
 
 // listRunner carries shared state for executing a task list.
@@ -212,11 +322,33 @@ type listRunner struct {
 	totalFailed    *int
 	batchFailed    map[string]bool // hosts failed in this batch (abort checks)
 	aborted        bool
+	mu             sync.Mutex // guards stats/totalFailed (strategy: free runs hosts in parallel)
+}
+
+// statFor returns the stats entry for a label, creating it if needed.
+func (c *listRunner) statFor(label string) *hostStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.stats[label]
+	if s == nil {
+		s = &hostStats{}
+		c.stats[label] = s
+	}
+	return s
+}
+
+// addFailed adds task failures to the play total.
+func (c *listRunner) addFailed(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	*c.totalFailed += n
 }
 
 // noteFailure records an unignored failure and aborts the run when the
 // play's any_errors_fatal / max_fail_percentage demands it.
 func (c *listRunner) noteFailure(label string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.batchFailed == nil {
 		c.batchFailed = make(map[string]bool)
 	}
@@ -343,11 +475,7 @@ func (c *listRunner) inScope(h Host, skip, only map[string]bool) bool {
 func (c *listRunner) skipHost(h Host, reason string) {
 	label := hostLabel(h)
 	activeEmitter.TaskSkipped(label, reason)
-	if s := c.stats[label]; s != nil {
-		s.skipped++
-	} else {
-		c.stats[label] = &hostStats{skipped: 1}
-	}
+	c.statFor(label).skipped++
 }
 
 // evalBoth evaluates parent conditions AND the task condition for one host.
@@ -393,7 +521,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			shouldRun, err := c.evalBoth(h, hVars, parentWhen, task.When)
 			if err != nil {
 				activeEmitter.Diagnostic(fmt.Sprintf("ERROR evaluating when: %v", err))
-				*c.totalFailed++
+				c.addFailed(1)
 				shouldRun = false
 			}
 			if shouldRun {
@@ -465,11 +593,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 
 		for _, h := range taskHosts {
 			r := final[hostLabel(h)]
-			s := c.stats[r.Host]
-			if s == nil {
-				c.stats[r.Host] = &hostStats{}
-				s = c.stats[r.Host]
-			}
+			s := c.statFor(r.Host)
 			if task.Register != "" {
 				if c.registeredVars[r.Host] == nil {
 					c.registeredVars[r.Host] = make(map[string]string)
@@ -478,7 +602,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 			}
 			n := applyResult(r, s)
 			if n > 0 {
-				*c.totalFailed += n
+				c.addFailed(n)
 				failed[r.Host] = true
 				c.noteFailure(r.Host)
 			}
@@ -511,7 +635,8 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 // executeItem runs one attempt of a task on the given hosts (no controls).
 func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) []Result {
 	switch {
-	case task.Module == "debug" || task.Module == "set_fact" || task.Module == "assert":
+	case task.Module == "debug" || task.Module == "set_fact" || task.Module == "assert" ||
+		task.Module == "group_by" || task.Module == "add_host":
 		return c.runLocal(taskHosts, task, item)
 	case task.DelegateTo != "":
 		return c.runDelegated(taskHosts, task, item)
@@ -519,7 +644,7 @@ func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) [
 		mkMod := func(h Host) (Module, error) {
 			return c.makeModule(task, h, item)
 		}
-		return runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+		return runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode, task.Throttle)
 	}
 }
 
@@ -562,11 +687,12 @@ func (c *listRunner) runMeta(task PlayTask) {
 	default:
 		activeEmitter.TaskResult(Result{Host: "localhost",
 			Err: fmt.Errorf("unknown meta action %q (want flush_handlers)", action)})
-		*c.totalFailed++
+		c.addFailed(1)
 	}
 }
 
-// runLocal executes control-side tasks (debug, set_fact, assert) without SSH.
+// runLocal executes control-side tasks (debug, set_fact, assert, group_by,
+// add_host) without SSH.
 func (c *listRunner) runLocal(taskHosts []Host, task PlayTask, item string) []Result {
 	results := make([]Result, 0, len(taskHosts))
 	for _, h := range taskHosts {
@@ -575,6 +701,10 @@ func (c *listRunner) runLocal(taskHosts []Host, task PlayTask, item string) []Re
 		switch task.Module {
 		case "assert":
 			results = append(results, runAssert(label, task, vars))
+		case "group_by":
+			results = append(results, c.runGroupBy(label, h, task, vars))
+		case "add_host":
+			results = append(results, c.runAddHost(label, task, vars))
 		case "debug":
 			results = append(results, runDebug(label, task, vars))
 		case "set_fact":
@@ -640,6 +770,112 @@ func runAssert(label string, task PlayTask, vars map[string]string) Result {
 		msg = expanded["m"]
 	}
 	return Result{Host: label, Output: msg}
+}
+
+// runGroupBy adds the host to a computed group (key=value template).
+func (c *listRunner) runGroupBy(label string, h Host, task PlayTask, vars map[string]string) Result {
+	keyTmpl, ok := task.Params["key"]
+	if !ok || keyTmpl == "" {
+		return Result{Host: label, Err: fmt.Errorf("group_by needs 'key' (key=groupname or key=group_{{...}})")}
+	}
+	expanded, err := expandVars(map[string]string{"k": keyTmpl}, vars)
+	if err != nil {
+		return Result{Host: label, Err: err}
+	}
+	kv := expanded["k"]
+	// Ansible form "key=<group>" or a plain group name/template.
+	group := kv
+	if strings.HasPrefix(kv, "key=") {
+		group = strings.TrimPrefix(kv, "key=")
+	}
+	if group == "" {
+		return Result{Host: label, Err: fmt.Errorf("group_by key expanded to empty, got %q", kv)}
+	}
+	raw := h.Addr
+	if h.Port != 0 && h.Port != 22 {
+		raw = h.Addr + ":" + strconv.Itoa(h.Port)
+	}
+	c.inv.mu.Lock()
+	defer c.inv.mu.Unlock()
+	g := c.inv.Groups[group]
+	for _, existing := range g.Hosts {
+		if existing == raw {
+			return Result{Host: label, Output: "already in group " + group}
+		}
+	}
+	g.Hosts = append(g.Hosts, raw)
+	c.inv.Groups[group] = g
+	return Result{Host: label, Output: "added to group " + group}
+}
+
+// runAddHost adds a brand-new host (with vars) to groups.
+func (c *listRunner) runAddHost(label string, task PlayTask, vars map[string]string) Result {
+	expanded, err := expandVars(task.Params, vars)
+	if err != nil {
+		return Result{Host: label, Err: err}
+	}
+	name, ok := expanded["name"]
+	if !ok || name == "" {
+		return Result{Host: label, Err: fmt.Errorf("add_host needs 'name'")}
+	}
+	entry := HostEntry{Vars: map[string]string{}}
+	h := Host{Addr: name, Port: 22}
+	for k, v := range expanded {
+		switch k {
+		case "name":
+		case "groups":
+		case "user":
+			h.User = v
+		case "port":
+			if n, err := strconv.Atoi(v); err == nil {
+				h.Port = n
+			}
+		case "key":
+			h.Key = v
+		case "connection":
+			h.Connection = v
+		case "password":
+			h.Password = v
+		default:
+			entry.Vars[k] = v
+		}
+	}
+	if h.Connection == "" {
+		h.Connection = "ssh"
+	}
+	groups := []string{}
+	for _, g := range strings.Split(expanded["groups"], ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			groups = append(groups, g)
+		}
+	}
+	if len(groups) == 0 {
+		return Result{Host: label, Err: fmt.Errorf("add_host needs 'groups'")}
+	}
+	c.inv.mu.Lock()
+	defer c.inv.mu.Unlock()
+	if c.inv.Groups == nil {
+		c.inv.Groups = map[string]Group{}
+	}
+	for _, gname := range groups {
+		g := c.inv.Groups[gname]
+		found := false
+		for _, existing := range g.Hosts {
+			if existing == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			g.Hosts = append(g.Hosts, name)
+		}
+		c.inv.Groups[gname] = g
+	}
+	if c.inv.Hosts == nil {
+		c.inv.Hosts = map[string]HostEntry{}
+	}
+	c.inv.Hosts[name] = entry
+	return Result{Host: label, Output: "added host " + name}
 }
 
 // runDebug renders a debug task: var=<name> prints one variable,
@@ -729,14 +965,10 @@ func (c *listRunner) flushHandlers() int {
 				handlerHosts = append(handlerHosts, h)
 			}
 		}
-		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode)
+		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode, 0)
 		for _, r := range results {
-			s := c.stats[r.Host]
-			if s == nil {
-				c.stats[r.Host] = &hostStats{}
-				s = c.stats[r.Host]
-			}
-			*c.totalFailed += applyResult(r, s)
+			s := c.statFor(r.Host)
+			c.addFailed(applyResult(r, s))
 			ran++
 		}
 	}

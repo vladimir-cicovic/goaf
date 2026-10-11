@@ -9,13 +9,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 // varsForHost merges group vars (sorted group order, later groups win) and
 // per-host vars (win over groups) for a resolved host.
+// Locked: group_by/add_host mutate groups during free-strategy runs.
 func (inv *Inventory) varsForHost(h Host) map[string]string {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
 	vars := map[string]string{}
 	if len(inv.Groups) == 0 && len(inv.Hosts) == 0 {
 		return vars
@@ -71,7 +75,9 @@ type HostEntry struct {
 }
 
 // Inventory describes server groups, per-host entries and global variables.
+// mu guards runtime mutation (group_by/add_host); load/resolve are single-threaded.
 type Inventory struct {
+	mu     sync.Mutex
 	Groups map[string]Group     `yaml:"groups"`
 	Hosts  map[string]HostEntry `yaml:"hosts"`
 	Vars   struct {
