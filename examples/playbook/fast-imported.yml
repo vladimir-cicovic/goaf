@@ -1,5 +1,5 @@
 - name: Imported mini play
-  hosts: debian
+  hosts: suse
   gather_facts: false
   tasks:
     - name: Imported task ran

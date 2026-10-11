@@ -18,8 +18,8 @@
     - name: Group by os
       group_by: {key: "demo-{{.goaf_os_family}}"}
 
-    - name: Add suse dynamically
-      add_host: {name: 192.168.152.10:2223, groups: dyn-suse, note: added}
+    - name: Add alpine dynamically
+      add_host: {name: 192.168.152.10:2224, groups: dyn-alp, note: added}
 
     - name: Throttled command
       command: "echo throttled-{{.goaf_os_family}}"
@@ -37,7 +37,7 @@
       command: "echo dynamic-group-ok"
 
 - name: Dynamic host demo
-  hosts: dyn-suse
+  hosts: dyn-alp
   gather_facts: false
   tasks:
     - name: Dynamic host here
