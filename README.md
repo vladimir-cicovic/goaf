@@ -1065,6 +1065,40 @@ hosts:
 External `.ps1` modules also run over WinRM (params as `$env:GOAF_P_*`);
 POSIX-shell external modules stay Linux-only.
 
+## Become as another user
+
+`become_user` / `become_method` on plays and tasks (default root/sudo).
+`su` has no password support (passwordless setups only).
+
+```yaml
+- name: Deploy
+  hosts: web
+  tasks:
+    - name: Whoami as nobody
+      command: "whoami"
+      become: true
+      become_user: nobody
+```
+
+## Connections - pooled multiplexing
+
+One SSH transport per host is kept for the whole run and shared by all
+channels (no re-handshake per play); dead sessions re-dial once. WinRM
+stays request-based. Nothing to configure.
+
+## Collections manifest - versions for external modules
+
+`modules.yml` next to the scripts documents versions; subdirectories
+become namespaced collections (`myco/motd.sh` → `myco.motd`).
+`goaf modules` lists everything with versions.
+
+```yaml
+# modules/modules.yml
+version: 1
+modules:
+  motd: {version: "1.2.0", description: "motd manager"}
+```
+
 ## Output - values printed at play end
 
 `output:` values render with the first host's vars (play, group, host,
