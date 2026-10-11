@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // External modules ("collections" light): executable scripts in the modules
@@ -107,9 +110,23 @@ func parseExtResult(out, wantKey string) (extResult, error) {
 	return res, nil
 }
 
+// readScriptFile reads a module script normalizing CRLF to LF:
+// Windows checkouts would otherwise ship \r into POSIX shells.
+func readScriptFile(bin string) ([]byte, error) {
+	data, err := os.ReadFile(bin)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), nil
+}
+
 // upload copies the script to the remote host (overwrite each time).
 func (m ExternalModule) upload(s Remote) error {
-	if err := s.Upload(m.Bin, m.remotePath()); err != nil {
+	data, err := readScriptFile(m.Bin)
+	if err != nil {
+		return fmt.Errorf("reading external module %q: %w", m.ModName, err)
+	}
+	if err := s.UploadContent(data, m.remotePath()); err != nil {
 		return fmt.Errorf("uploading external module %q: %w", m.ModName, err)
 	}
 	if _, err := s.Run("chmod +x " + shQuote(m.remotePath())); err != nil {
@@ -158,7 +175,7 @@ func (m ExternalModule) invokeWinRM(s *WinRMSession, verb, wantKey string) (extR
 	if !strings.HasSuffix(strings.ToLower(m.Bin), ".ps1") {
 		return extResult{}, fmt.Errorf("external module %q: only .ps1 scripts run over WinRM", m.ModName)
 	}
-	data, err := os.ReadFile(m.Bin)
+	data, err := readScriptFile(m.Bin)
 	if err != nil {
 		return extResult{}, fmt.Errorf("reading external module %q: %w", m.ModName, err)
 	}
@@ -218,6 +235,36 @@ func (m ExternalModule) Apply(s Remote) (string, error) {
 // parsing accepts any key=value pair for them.
 var externalModuleNames = map[string]bool{}
 
+// extModuleMeta is optional per-module metadata from modules.yml.
+type extModuleMeta struct {
+	Version     string `yaml:"version"`
+	Description string `yaml:"description"`
+}
+
+// extModuleMetas holds manifest metadata by module name.
+var extModuleMetas = map[string]extModuleMeta{}
+
+// loadModulesManifest reads an optional modules.yml beside the scripts:
+//
+//	version: 1
+//	modules:
+//	  motd: {version: "1.2.0", description: "..."}
+func loadModulesManifest(dir string) {
+	data, err := os.ReadFile(filepath.Join(dir, "modules.yml"))
+	if err != nil {
+		return
+	}
+	var doc struct {
+		Modules map[string]extModuleMeta `yaml:"modules"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return
+	}
+	for name, meta := range doc.Modules {
+		extModuleMetas[name] = meta
+	}
+}
+
 // RegisterExternalModules scans dir for executable scripts and registers
 // each as a module (file name without extension). Missing default dir is
 // fine; an explicitly requested unreadable dir is an error.
@@ -231,26 +278,50 @@ func RegisterExternalModules(dir string, explicit bool) error {
 	}
 	for _, e := range entries {
 		if e.IsDir() {
+			// One level of subdirectories: collection dirs, modules
+			// named <dir>.<file> (both forms work, dotted wins on clash).
+			sub := filepath.Join(dir, e.Name())
+			subEntries, err := os.ReadDir(sub)
+			if err != nil {
+				continue
+			}
+			for _, se := range subEntries {
+				if se.IsDir() || strings.HasPrefix(se.Name(), ".") {
+					continue
+				}
+				registerExternalFile(sub, se.Name(), e.Name()+".")
+			}
 			continue
 		}
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		modName := name
-		if idx := strings.LastIndex(name, "."); idx > 0 {
-			modName = name[:idx]
+		if name == "modules.yml" {
+			continue // manifest, not a module
 		}
-		if _, ok := moduleRegistry[modName]; ok {
-			continue // builtin wins over external
-		}
-		bin := filepath.Join(dir, name)
-		moduleRegistry[modName] = externalFactory(modName, bin)
-		externalModuleNames[modName] = true
-		knownModuleNames = append(knownModuleNames, modName)
+		registerExternalFile(dir, name, "")
 	}
+	loadModulesManifest(dir)
 	sort.Strings(knownModuleNames)
 	return nil
+}
+
+// registerExternalFile registers one script; prefix namespaces collections
+// (sub/motd.sh becomes sub.motd).
+func registerExternalFile(dir, name, prefix string) {
+	modName := name
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		modName = name[:idx]
+	}
+	modName = prefix + modName
+	if _, ok := moduleRegistry[modName]; ok {
+		return // builtin (or earlier) wins over external
+	}
+	bin := filepath.Join(dir, name)
+	moduleRegistry[modName] = externalFactory(modName, bin)
+	externalModuleNames[modName] = true
+	knownModuleNames = append(knownModuleNames, modName)
 }
 
 // externalFactory builds ExternalModules with call-time params.

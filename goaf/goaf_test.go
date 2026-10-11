@@ -591,27 +591,51 @@ func TestForgetState(t *testing.T) {
 		}
 	}()
 	h := Host{Addr: "h1", User: "root", Port: 22}
-	recordState(h, "p", "copy", map[string]string{"dest": "/x"}, "out")
-	recordState(h, "p", "file", map[string]string{"path": "/y"}, "out")
-	if len(loadState()) != 2 {
-		t.Fatalf("got %d entries", len(loadState()))
+	recordState(nil, h, "p", "copy", map[string]string{"dest": "/x"}, "out")
+	recordState(nil, h, "p", "file", map[string]string{"path": "/y"}, "out")
+	if len(loadStateFor(nil)) != 2 {
+		t.Fatalf("got %d entries", len(loadStateFor(nil)))
 	}
-	if n := forgetState("h1"); n != 2 {
+	if n := forgetState(nil, "h1"); n != 2 {
 		t.Errorf("forget host: removed %d", n)
 	}
-	if len(loadState()) != 0 {
+	if len(loadStateFor(nil)) != 0 {
 		t.Error("state should be empty")
 	}
-	recordState(h, "p", "copy", map[string]string{"dest": "/x"}, "out")
-	entries := loadState()
+	recordState(nil, h, "p", "copy", map[string]string{"dest": "/x"}, "out")
+	entries := loadStateFor(nil)
 	if len(entries) != 1 {
 		t.Fatalf("got %d entries", len(entries))
 	}
-	if n := forgetState(entries[0].Fingerprint[:8]); n != 1 {
+	if n := forgetState(nil, entries[0].Fingerprint[:8]); n != 1 {
 		t.Errorf("forget by prefix: removed %d", n)
 	}
-	if n := forgetState("nope"); n != 0 {
+	if n := forgetState(nil, "nope"); n != 0 {
 		t.Errorf("forget missing: removed %d", n)
+	}
+}
+
+func TestStateScoping(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	invA := &Inventory{}
+	invA.invPath = filepath.Join(dir, "a.yml")
+	invB := &Inventory{}
+	invB.invPath = filepath.Join(dir, "b.yml")
+	h := Host{Addr: "h1", User: "root", Port: 22}
+	recordState(invA, h, "p", "copy", map[string]string{"dest": "/x"}, "out")
+	if len(loadStateFor(invA)) != 1 {
+		t.Fatalf("scope A should have 1, got %d", len(loadStateFor(invA)))
+	}
+	if len(loadStateFor(invB)) != 0 {
+		t.Errorf("scope B should be empty, got %d", len(loadStateFor(invB)))
+	}
+	// Same inventory + different workspace = different scope.
+	oldWS := workspaceName
+	workspaceName = "prod"
+	defer func() { workspaceName = oldWS }()
+	if len(loadStateFor(invA)) != 0 {
+		t.Errorf("prod scope should be empty, got %d", len(loadStateFor(invA)))
 	}
 }
 
@@ -883,6 +907,39 @@ func taskEnvMergeForTest(play, task map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func TestBecomeKeys(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  become_user: deploy\n  become_method: su\n  tasks:\n    - name: T\n      command: uptime\n      become: true\n      become_user: nobody\n"), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if p.BecomeUser != "deploy" || p.BecomeMethod != "su" {
+		t.Errorf("bad play become: %+v", p)
+	}
+	task := p.Tasks[0]
+	if task.Become == nil || !*task.Become || task.BecomeUser != "nobody" {
+		t.Errorf("bad task become: %+v", task)
+	}
+	if _, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  become_method: doas\n"), "", "roles"); err == nil {
+		t.Error("expected error for bad play become_method")
+	}
+	if _, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  tasks:\n    - name: T\n      command: uptime\n      become_method: doas\n"), "", "roles"); err == nil {
+		t.Error("expected error for bad task become_method")
+	}
+}
+
+func TestPoolKey(t *testing.T) {
+	a := Host{Addr: "h", Port: 22, User: "u"}
+	b := Host{Addr: "h", Port: 22, User: "u"}
+	if !sameHostParams(a, b) {
+		t.Error("identical hosts should match")
+	}
+	b.Port = 2222
+	if sameHostParams(a, b) {
+		t.Error("different ports must not match")
+	}
 }
 
 func TestTagsAllow(t *testing.T) {

@@ -929,13 +929,15 @@ run or plan apply (anything but `y` aborts). Without a terminal
 ## Drift - is the fleet still as applied
 
 Every applied change (idempotent modules only) is recorded in
-`~/.goaf/state.json`. `drift` re-runs Check for each recorded piece and
-reports whether hosts are still in the desired state.
+`~/.goaf/state-<hash>.json`, scoped by inventory + workspace (a legacy
+global `state.json` migrates once, filtered to current hosts).
+`drift` re-runs Check for each recorded piece and reports whether hosts
+are still in the desired state.
 
 ```bash
   goaf -i inv.yml drift
   # 192.168.1.10:2222          OK: copy /etc/app.conf
-  # 192.168.1.11:2222          DRIFT: install tree
+  # 192.168.1.11:2226          DRIFT: install tree
   # drift: 1 ok, 1 drifted, 0 errors
 ```
 Exit code is 2 when drift or errors are found (CI-friendly).

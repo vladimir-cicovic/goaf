@@ -18,7 +18,7 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 		fmt.Fprintf(os.Stderr, "error loading inventory: %v\n", err)
 		return 1
 	}
-	entries := loadState()
+	entries := loadStateFor(inv)
 	if len(entries) == 0 {
 		fmt.Println("no recorded state yet — run something first")
 		return 0
@@ -67,7 +67,10 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 			h, ok := invHosts[label]
 			if !ok {
 				// Fall back to stored connection data.
-				h = Host{Addr: list[0].Addr, Port: list[0].Port, User: list[0].User, Key: list[0].Key}
+				h = Host{Addr: list[0].Addr, Port: list[0].Port, User: list[0].User, Key: list[0].Key, Connection: list[0].Connection}
+				if h.Connection == "" {
+					h.Connection = "ssh"
+				}
 			}
 			sess, err := dialHost(h)
 			if err != nil {
@@ -110,7 +113,7 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 						fmt.Printf("%-28s FIXED: %s\n", label, describeEntry(e))
 						okCount++
 						mu.Unlock()
-						recordState(h, "drift-fix", e.Module, e.Params, strings.TrimSpace(out))
+						recordState(inv, h, "drift-fix", e.Module, e.Params, strings.TrimSpace(out))
 						continue
 					}
 				}
