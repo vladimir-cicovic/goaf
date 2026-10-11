@@ -1,0 +1,57 @@
+# Modules demo: safe read-only/info modules on any hosts (group "all"),
+# plus Windows read-only tasks (group "win"). Needs no privilege and
+# changes nothing (except /tmp/demo.* scratch files on Linux).
+- name: Info modules demo
+  hosts: all
+  tasks:
+    - name: Assert facts
+      assert:
+        that:
+          - '{{ne .goaf_os ""}}'
+        success_msg: "running on {{.goaf_os}}"
+
+    - name: Stat tmp
+      stat: {path: /tmp}
+      register: tmpstat
+
+    - name: Show tmp
+      debug: {msg: "tmp => {{.tmpstat}}"}
+
+    - name: Wait for SSH locally
+      wait_for: {port: "22", timeout: "30"}
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Short pause
+      pause: {seconds: "2", prompt: "demo pause"}
+
+    - name: Fetch example page
+      get_url: {url: https://example.com, dest: /tmp/demo.html}
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Ensure tar (openSUSE minimal lacks it)
+      install: tar
+      when: '{{eq .goaf_os_family "suse"}}'
+
+    - name: Pack it
+      command: "tar -cf /tmp/demo.tar -C /tmp demo.html"
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Unpack it
+      unarchive: {src: /tmp/demo.tar, dest: /tmp/demo-out, creates: /tmp/demo-out/demo.html}
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Find unpacked
+      find: {paths: /tmp/demo-out, patterns: "*.html"}
+      when: '{{ne .goaf_os_family "windows"}}'
+
+- name: Windows info demo
+  hosts: win
+  tasks:
+    - name: Stat Windows dir
+      stat: {path: C:/Windows}
+
+    - name: Wait for WinRM locally
+      wait_for: {port: "5985", timeout: "30"}
+
+    - name: Hostname check
+      hostname: {name: "{{.goaf_hostname}}"}
