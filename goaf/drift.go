@@ -87,7 +87,7 @@ func runDrift(invPath string, become bool, parallelism int, fix bool) int {
 				factory, ok := LookupModule(e.Module)
 				if !ok {
 					mu.Lock()
-					fmt.Printf("%-28s ERROR: unknown module %q\n", label, e.Module)
+					fmt.Printf("%-28s ERROR: unknown module %q (external? pass the same --modules-path used at apply time)\n", label, e.Module)
 					errCount++
 					mu.Unlock()
 					continue
