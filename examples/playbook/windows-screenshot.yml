@@ -1,23 +1,33 @@
 # Windows demo: screenshot the guest desktop and download the PNG.
-# Run from the repo root (script path below is relative to it).
-# A scheduled task with /IT is required: WinRM shells run in session 0
-# without a visible desktop, so direct capture would be black.
+# Fully windowless: a tiny C# tool is compiled ON the guest as a Windows
+# (non-console) exe, so no CMD/console ever flashes. It runs in YOUR
+# interactive session via a scheduled task (/IT) - WinRM shells (session 0)
+# see no desktop. Run from the repo root.
 - name: Windows screenshot demo
   hosts: win
   tasks:
-    - name: Upload screenshot script
-      copy: {src: examples/windows/Take-Screenshot.ps1, dest: C:/Temp/shot.ps1}
+    - name: Upload screenshot source
+      copy: {src: examples/windows/Screenshot.cs, dest: C:/Temp/shot.cs}
+
+    - name: Compile screenshot tool
+      command: 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /out:C:\Temp\shot.exe C:\Temp\shot.cs'
+
+    - name: Clean previous screenshot
+      command: "Remove-Item C:/Temp/screen.png -Force -ErrorAction SilentlyContinue; exit 0"
+
+    - name: Assert clean slate
+      command: "(Test-Path C:/Temp/screen.png)"
+      failed_when: '{{eq .result "True"}}'
 
     - name: Create interactive task
-      command: 'schtasks /create /tn goaf-shot /tr "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:/Temp/shot.ps1" /sc once /st 23:59 /f /IT'
+      command: 'schtasks /create /tn goaf-shot /tr "C:/Temp/shot.exe C:/Temp/screen.png" /sc once /st 23:59 /f /IT'
 
     - name: Run screenshot task
       command: "schtasks /run /tn goaf-shot"
 
     - name: Wait for PNG
       command: "(Test-Path C:/Temp/screen.png)"
-      register: shot
-      retries: 6
+      retries: 12
       delay: 5
       until: '{{eq .result "True"}}'
 
