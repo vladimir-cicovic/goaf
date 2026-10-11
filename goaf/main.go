@@ -558,7 +558,7 @@ func isKVArg(action, s string) bool {
 		}
 		return false
 	}
-	if action == "template" || action == "set_fact" {
+	if action == "template" || action == "set_fact" || action == "add_host" {
 		return true // any key=value is a variable
 	}
 	if _, ok := knownCLIParams[action]; !ok {
@@ -953,6 +953,9 @@ func runValidate(playPath, invPath string) int {
 		collectRuntimeVars(play.PreTasks)
 		collectRuntimeVars(play.Tasks)
 		collectRuntimeVars(play.PostTasks)
+		for _, spec := range play.VarsPrompt {
+			dummyVars[spec.Name] = "PROMPTED"
+		}
 		checkVars := mergeVars(mergeVars(workspaceVars, play.Vars), dummyVars)
 		playFailed := 0
 		for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {

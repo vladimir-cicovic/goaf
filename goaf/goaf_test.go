@@ -781,6 +781,64 @@ func TestNewModuleFactories(t *testing.T) {
 	}
 }
 
+func TestVarsFilesStrategy(t *testing.T) {
+	dir := t.TempDir()
+	vf := filepath.Join(dir, "common.yml")
+	if err := os.WriteFile(vf, []byte("a: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  vars_files:\n    - "+vf+"\n  vars: {b: \"2\"}\n  strategy: free\n  tasks:\n    - name: T\n      command: uptime\n"), dir, "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if p.Vars["a"] != "1" || p.Vars["b"] != "2" || p.Strategy != "free" {
+		t.Errorf("bad vars/strategy: %+v", p)
+	}
+	if _, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  strategy: bogus\n"), dir, "roles"); err == nil {
+		t.Error("expected error for bad strategy")
+	}
+	if _, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  vars_files:\n    - nope-missing.yml\n"), dir, "roles"); err == nil {
+		t.Error("expected error for missing vars file")
+	}
+}
+
+func TestVarsPromptParse(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  vars_prompt:\n    - {name: pw, prompt: \"Pass?\", private: true, default: d}\n"), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := plays[0].VarsPrompt
+	if len(spec) != 1 || spec[0].Name != "pw" || !spec[0].Private || spec[0].Default != "d" {
+		t.Errorf("bad prompt parse: %+v", spec)
+	}
+}
+
+func TestImportPlaybook(t *testing.T) {
+	dir := t.TempDir()
+	inc := filepath.Join(dir, "inc.yml")
+	if err := os.WriteFile(inc, []byte("- name: Imported\n  hosts: all\n  tasks:\n    - name: T\n      command: uptime\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plays, err := loadPlaybookBytes([]byte("- import_playbook: inc.yml\n- name: Main\n  hosts: all\n"), dir, "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plays) != 2 || plays[0].Name != "Imported" || plays[1].Name != "Main" {
+		t.Errorf("bad import splice: %+v", plays)
+	}
+}
+
+func TestThrottleParse(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  tasks:\n    - name: T\n      command: uptime\n      throttle: 3\n"), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plays[0].Tasks[0].Throttle != 3 {
+		t.Errorf("bad throttle: %+v", plays[0].Tasks[0])
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

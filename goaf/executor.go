@@ -112,7 +112,7 @@ func closeAll(sessions map[string]Remote) {
 
 // runOnSessions executes a per-host built module on existing sessions in
 // parallel. Hosts without a session report the stored connection error.
-func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]Remote, connErrs map[string]error, become, checkMode bool) []Result {
+func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions map[string]Remote, connErrs map[string]error, become, checkMode bool, throttle int) []Result {
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -122,6 +122,9 @@ func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions ma
 	semSize := len(hosts)
 	if semSize > 50 {
 		semSize = 50
+	}
+	if throttle > 0 && throttle < semSize {
+		semSize = throttle
 	}
 	sem := make(chan struct{}, semSize)
 

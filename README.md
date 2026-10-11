@@ -1331,6 +1331,78 @@ to the including file, then the working directory).
       include_tasks: common-tasks.yml
 ```
 
+Splice whole playbooks (recursive, cycle-guarded):
+
+```yaml
+- import_playbook: base.yml
+- name: Main
+  hosts: web
+```
+
+## Vars files and prompts - variables outside tasks
+
+`vars_files` loads YAML maps (flat or `{vars:}` form, vault allowed);
+play `vars:` win over them.
+
+```yaml
+- name: Deploy
+  hosts: web
+  vars_files: [common.yml, env/prod.yml]
+```
+`vars_prompt` asks at runtime (before tasks); non-terminal runs take
+`default` (or empty) with a notice.
+
+```yaml
+  vars_prompt:
+    - {name: db_pass, prompt: "DB password?", private: true}
+    - {name: tag, prompt: "Release tag?", default: latest}
+```
+
+## Strategy free - no per-task barrier
+
+`strategy: free` runs every host through all tasks independently and in
+parallel (output lines may interleave); default `linear` keeps the
+per-task barrier across hosts.
+
+```yaml
+- name: Fast rollout
+  hosts: web
+  strategy: free
+```
+
+## Throttle - per-task parallelism cap
+
+```yaml
+    - name: Gentle migration
+      command: "/opt/app/migrate.sh"
+      run_once: true
+      throttle: 2
+```
+
+## Group by / add host - dynamic inventory mid-run
+
+`group_by` files a host into a computed group for later plays;
+`add_host` registers a brand-new host (with vars) into groups.
+
+```yaml
+    - name: Group by os
+      group_by: {key: "osfam-{{.goaf_os_family}}"}
+    - name: Register deploy box
+      add_host: {name: 10.0.0.99, groups: dynamic, user: deploy, role: db}
+```
+
+## Role dependencies - roles using roles
+
+`roles/<name>/meta/main.yml` lists dependencies (same entry forms);
+they run first, cycles are skipped.
+
+```yaml
+# roles/app/meta/main.yml
+dependencies:
+  - base
+  - {role: db, db_name: shop}
+```
+
 ## External modules - your own scripts as modules
 
 Any executable script in the modules path becomes a first-class module
