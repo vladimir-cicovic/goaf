@@ -197,7 +197,11 @@ func dialHost(h Host) (Remote, error) {
 }
 
 // isWinRM reports whether a session speaks WinRM (module branching).
+// EnvSession wrappers are unwrapped first.
 func isWinRM(s Remote) bool {
+	if e, ok := s.(EnvSession); ok {
+		s = e.Remote
+	}
 	_, ok := s.(*WinRMSession)
 	return ok
 }

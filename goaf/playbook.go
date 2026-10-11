@@ -33,6 +33,8 @@ type Play struct {
 	RolesPath string `yaml:"-"`
 	// Outputs are evaluated once per play (first host's vars) and printed.
 	Outputs map[string]string `yaml:"output"`
+	// Environment adds env vars to every task command (task wins).
+	Environment map[string]string `yaml:"environment"`
 	// Strategy "free" runs each host through all tasks independently
 	// (default "linear": task barrier across hosts).
 	Strategy string `yaml:"strategy"`
@@ -42,24 +44,28 @@ type PlayTask struct {
 	Name        string
 	Module      string // "block" for block items (see Block/Rescue/Always)
 	Params      map[string]string
-	When        string     // Go template expression; skip task if evaluates to false/0/no/empty
-	Loop        []string   // iterate task over each item, available as {{.item}}
-	Notify      string     // handler name to trigger if this task changed something
-	Register    string     // save task output into a per-host variable for later tasks
-	FailedWhen  string     // Go template over vars+facts+result; mark failed when true
-	ChangedWhen string     // Go template over vars+facts+result; override changed when set
-	IgnoreErrs  bool       // continue the play when this task fails
-	Tags        []string   // task tags for --tags/--skip-tags filtering
-	Block       []PlayTask // block: section (Module == "block")
-	Rescue      []PlayTask // run on hosts where block tasks failed
-	Always      []PlayTask // always run, regardless of block/rescue outcome
-	RunOnce     bool       // run only on the first host
-	DelegateTo  string     // "localhost" runs a command task locally (other modules error)
-	Retries     int        // extra attempts after the first (total = 1 + retries)
-	Delay       int        // seconds between retries
-	Until       string     // Go template over vars+facts+result; retry until true
-	RoleDir     string     // set for tasks from a role (resolves files//templates/)
-	Throttle    int        // max parallel hosts for this task (0 = play default)
+	When        string            // Go template expression; skip task if evaluates to false/0/no/empty
+	Loop        []string          // iterate task over each item, available as {{.item}}
+	Notify      string            // handler name to trigger if this task changed something
+	Register    string            // save task output into a per-host variable for later tasks
+	FailedWhen  string            // Go template over vars+facts+result; mark failed when true
+	ChangedWhen string            // Go template over vars+facts+result; override changed when set
+	IgnoreErrs  bool              // continue the play when this task fails
+	Tags        []string          // task tags for --tags/--skip-tags filtering
+	Block       []PlayTask        // block: section (Module == "block")
+	Rescue      []PlayTask        // run on hosts where block tasks failed
+	Always      []PlayTask        // always run, regardless of block/rescue outcome
+	RunOnce     bool              // run only on the first host
+	DelegateTo  string            // "localhost" runs a command task locally (other modules error)
+	Retries     int               // extra attempts after the first (total = 1 + retries)
+	Delay       int               // seconds between retries
+	Until       string            // Go template over vars+facts+result; retry until true
+	RoleDir     string            // set for tasks from a role (resolves files//templates/)
+	Throttle    int               // max parallel hosts for this task (0 = play default)
+	NoLog       bool              // hide task output (secrets) in console/JSON
+	Environment map[string]string // extra env vars for task commands
+	CheckMode   *bool             // override global check mode for this task
+	Listen      []string          // handler topics: notify any of these triggers it
 }
 
 var knownModuleNames = []string{
@@ -102,6 +108,7 @@ type rawPlay struct {
 	VarsFiles   []string                 `yaml:"vars_files"`
 	VarsPrompt  []interface{}            `yaml:"vars_prompt"`
 	Strategy    string                   `yaml:"strategy"`
+	Environment map[string]interface{}   `yaml:"environment"`
 }
 
 func loadPlaybookDepth(data []byte, dir, rolesDir string, depth int) ([]Play, error) {
@@ -227,6 +234,10 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 	if rp.AnyErrors != nil {
 		anyFatal = *rp.AnyErrors
 	}
+	playEnv, err := parseEnvMap(rp.Environment)
+	if err != nil {
+		return Play{}, fmt.Errorf("play %q: %w", rp.Name, err)
+	}
 	return Play{
 		Name:           rp.Name,
 		Hosts:          rp.Hosts,
@@ -242,6 +253,7 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 		Outputs:        rp.Outputs,
 		VarsPrompt:     prompts,
 		Strategy:       rp.Strategy,
+		Environment:    playEnv,
 	}, nil
 }
 
@@ -545,6 +557,32 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 	if v, ok := raw["run_once"]; ok {
 		runOnce = fmt.Sprintf("%v", v) == "true"
 	}
+	noLog := false
+	if v, ok := raw["no_log"]; ok {
+		noLog = fmt.Sprintf("%v", v) == "true"
+	}
+	env, err := parseEnvMap(raw["environment"])
+	if err != nil {
+		return PlayTask{}, fmt.Errorf("task %q: %w", name, err)
+	}
+	var checkMode *bool
+	if v, ok := raw["check_mode"]; ok {
+		b := fmt.Sprintf("%v", v) == "true"
+		checkMode = &b
+	}
+	var listen []string
+	if v, ok := raw["listen"]; ok {
+		switch t := v.(type) {
+		case string:
+			listen = []string{t}
+		case []interface{}:
+			for _, item := range t {
+				listen = append(listen, fmt.Sprintf("%v", item))
+			}
+		default:
+			return PlayTask{}, fmt.Errorf("task %q: listen must be a string or list", name)
+		}
+	}
 	delegateTo, _ := raw["delegate_to"].(string)
 	retries, delay, throttle := 0, 0, 0
 	if v, ok := raw["retries"]; ok {
@@ -688,10 +726,30 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 			Delay:       delay,
 			Until:       until,
 			Throttle:    throttle,
+			NoLog:       noLog,
+			Environment: env,
+			CheckMode:   checkMode,
+			Listen:      listen,
 		}, nil
 	}
 	return PlayTask{}, fmt.Errorf("task %q: no known module key found (expected one of: %s)",
 		name, strings.Join(knownModuleNames, ", "))
+}
+
+// parseEnvMap parses an environment: map (values stringified).
+func parseEnvMap(v interface{}) (map[string]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("environment must be a map")
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		out[k] = fmt.Sprintf("%v", val)
+	}
+	return out, nil
 }
 
 // parseSubTasks parses a block/rescue/always sub-list (nil when absent).
