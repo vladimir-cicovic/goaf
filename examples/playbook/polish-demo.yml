@@ -1,0 +1,46 @@
+# Polish demo: no_log, environment, per-task check_mode, listen topics.
+# Works on Linux and Windows (group "all" + "win").
+- name: Polish demo
+  hosts: all
+  vars:
+    myvar: s3cret-value
+  environment:
+    PLAY_ENV: play-value
+  tasks:
+    - name: Secret hidden
+      command: "echo supersecret-{{.myvar}}"
+      no_log: true
+
+    - name: Env merge linux
+      command: "echo play-$PLAY_ENV task-$TASK_ENV"
+      environment:
+        TASK_ENV: task-value
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Env merge windows
+      command: "echo play-$env:PLAY_ENV task-$env:TASK_ENV"
+      environment:
+        TASK_ENV: task-value
+      when: '{{eq .goaf_os_family "windows"}}'
+
+    - name: Notify topic
+      command: "echo notify-me"
+      notify: app-topic
+
+  handlers:
+    - name: Topic listener
+      listen: [app-topic]
+      command: "echo topic-handled"
+
+- name: Check-mode override demo
+  hosts: all
+  tasks:
+    - name: Forced apply linux
+      file: {path: /tmp/polish-demo.txt, state: file}
+      check_mode: false
+      when: '{{ne .goaf_os_family "windows"}}'
+
+    - name: Forced apply windows
+      file: {path: C:/Temp/polish-demo.txt, state: file}
+      check_mode: false
+      when: '{{eq .goaf_os_family "windows"}}'
