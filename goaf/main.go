@@ -529,6 +529,20 @@ var knownCLIParams = map[string]map[string]bool{
 	"debug":          {"var": true, "msg": true},
 	"script":         {"src": true, "args": true},
 	"fetch":          {"src": true, "dest": true},
+	"winget":         {"id": true, "name": true, "state": true},
+	"git":            {"repo": true, "dest": true, "version": true, "update": true},
+	"get_url":        {"url": true, "dest": true, "checksum": true},
+	"unarchive":      {"src": true, "dest": true, "creates": true},
+	"cron":           {"name": true, "job": true, "minute": true, "hour": true, "dom": true, "month": true, "dow": true, "state": true, "user": true},
+	"sysctl":         {"name": true, "value": true, "state": true, "persist": true},
+	"mount":          {"src": true, "path": true, "fstype": true, "opts": true, "state": true},
+	"hostname":       {"name": true},
+	"timezone":       {"name": true},
+	"stat":           {"path": true},
+	"slurp":          {"src": true},
+	"find":           {"paths": true, "path": true, "patterns": true, "file_type": true},
+	"wait_for":       {"port": true, "host": true, "path": true, "timeout": true, "delay": true},
+	"pause":          {"seconds": true, "prompt": true},
 }
 
 // isKVArg reports whether s is a key=value pair valid for the given action.
@@ -1058,6 +1072,21 @@ func usage() {
 	fmt.Println("  fetch    src=<remote> dest=<local> (download file)")
 	fmt.Println("  debug    var=<name> | msg=\"<text>\" (playbook: show value)")
 	fmt.Println("  set_fact <key=value ...> (playbook: define host variables)")
+	fmt.Println("  assert   that=\"<cond>\" [fail_msg=<m>] [success_msg=<m>] (playbook)")
+	fmt.Println("  winget   id=<pkg> [state=present|absent] (Windows only)")
+	fmt.Println("  git      repo=<url> dest=<path> [version=<v>] [update=true|false]")
+	fmt.Println("  get_url  url=<url> dest=<path> [checksum=sha256:<hex>]")
+	fmt.Println("  unarchive src=<archive> dest=<dir> [creates=<sentinel>]")
+	fmt.Println("  cron     name=<n> job=<cmd> [minute=..] [state=present|absent] (Unix)")
+	fmt.Println("  sysctl   name=<k> [value=<v>] [state=present|absent] (Linux)")
+	fmt.Println("  mount    path=<dir> [src=<dev>] [state=mounted|unmounted|present|absent] (Linux)")
+	fmt.Println("  hostname name=<name>")
+	fmt.Println("  timezone name=<zone>")
+	fmt.Println("  stat     path=<path> (info into register, never changes)")
+	fmt.Println("  slurp    src=<file> (base64 content into register)")
+	fmt.Println("  find     paths=<dir> [patterns=*.log] [file_type=file|directory|any]")
+	fmt.Println("  wait_for [port=<p>] [host=<h>] [path=<f>] [timeout=300] [delay=0]")
+	fmt.Println("  pause    [seconds=<n>] [prompt=<text>]")
 	fmt.Println("  setup    (display gathered host facts: os, hostname, arch, kernel, ip)")
 	fmt.Println("\nPlaybook (run):")
 	fmt.Println("  goaf -i inventory.yml run site.yml")

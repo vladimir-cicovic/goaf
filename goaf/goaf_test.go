@@ -726,6 +726,61 @@ func TestSendNotify(t *testing.T) {
 	sendNotify("http://127.0.0.1:1/nope", "always", "adhoc", "web", 1, 1, 0, 0)
 }
 
+func TestNewModuleFactories(t *testing.T) {
+	// Missing required params must error.
+	for mod, params := range map[string]map[string]string{
+		"winget":    {},
+		"git":       {"repo": "x"},
+		"get_url":   {"url": "x"},
+		"unarchive": {"src": "x"},
+		"cron":      {},
+		"sysctl":    {},
+		"mount":     {},
+		"hostname":  {},
+		"timezone":  {},
+		"stat":      {},
+		"slurp":     {},
+		"find":      {},
+	} {
+		factory, ok := LookupModule(mod)
+		if !ok {
+			t.Errorf("module %q not registered", mod)
+			continue
+		}
+		if _, err := factory(params); err == nil {
+			t.Errorf("module %q should require params", mod)
+		}
+	}
+	// Valid params build the right types.
+	valid := map[string]map[string]string{
+		"winget":    {"id": "7zip.7zip"},
+		"git":       {"repo": "https://x/y.git", "dest": "/tmp/y"},
+		"get_url":   {"url": "https://x/y", "dest": "/tmp/y"},
+		"unarchive": {"src": "/tmp/a.tgz", "dest": "/tmp/b"},
+		"cron":      {"name": "n", "job": "echo hi"},
+		"sysctl":    {"name": "a.b"},
+		"mount":     {"path": "/mnt/x"},
+		"hostname":  {"name": "h"},
+		"timezone":  {"name": "UTC"},
+		"stat":      {"path": "/tmp"},
+		"slurp":     {"src": "/tmp/f"},
+		"find":      {"paths": "/tmp"},
+		"wait_for":  {"port": "22"},
+		"pause":     {"seconds": "1"},
+		"assert":    {"that": "true"},
+	}
+	for mod, params := range valid {
+		factory, ok := LookupModule(mod)
+		if !ok {
+			t.Errorf("module %q not registered", mod)
+			continue
+		}
+		if _, err := factory(params); err != nil {
+			t.Errorf("module %q valid params rejected: %v", mod, err)
+		}
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

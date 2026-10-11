@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -510,7 +511,7 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 // executeItem runs one attempt of a task on the given hosts (no controls).
 func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) []Result {
 	switch {
-	case task.Module == "debug" || task.Module == "set_fact":
+	case task.Module == "debug" || task.Module == "set_fact" || task.Module == "assert":
 		return c.runLocal(taskHosts, task, item)
 	case task.DelegateTo != "":
 		return c.runDelegated(taskHosts, task, item)
@@ -565,13 +566,15 @@ func (c *listRunner) runMeta(task PlayTask) {
 	}
 }
 
-// runLocal executes control-side tasks (debug, set_fact) without SSH.
+// runLocal executes control-side tasks (debug, set_fact, assert) without SSH.
 func (c *listRunner) runLocal(taskHosts []Host, task PlayTask, item string) []Result {
 	results := make([]Result, 0, len(taskHosts))
 	for _, h := range taskHosts {
 		label := hostLabel(h)
 		vars := taskVars(c.inv, c.play, h, item, c.allFacts, c.registeredVars)
 		switch task.Module {
+		case "assert":
+			results = append(results, runAssert(label, task, vars))
 		case "debug":
 			results = append(results, runDebug(label, task, vars))
 		case "set_fact":
@@ -592,6 +595,51 @@ func (c *listRunner) runLocal(taskHosts []Host, task PlayTask, item string) []Re
 		}
 	}
 	return results
+}
+
+// runAssert evaluates `that` conditions (that, that.0, that.1, ... sorted)
+// with full task vars. Failure carries fail_msg (or a default); success
+// carries success_msg (or a pass summary).
+func runAssert(label string, task PlayTask, vars map[string]string) Result {
+	var conds []string
+	if t, ok := task.Params["that"]; ok && t != "" {
+		conds = append(conds, t)
+	}
+	var numbered []string
+	for k := range task.Params {
+		if strings.HasPrefix(k, "that.") {
+			numbered = append(numbered, k)
+		}
+	}
+	sort.Strings(numbered)
+	for _, k := range numbered {
+		conds = append(conds, task.Params[k])
+	}
+	if len(conds) == 0 {
+		return Result{Host: label, Err: fmt.Errorf("assert needs 'that'")}
+	}
+	for _, cond := range conds {
+		ok, err := evalWhen(cond, vars)
+		if err != nil {
+			return Result{Host: label, Err: fmt.Errorf("assert: %w", err)}
+		}
+		if !ok {
+			msg := task.Params["fail_msg"]
+			if msg == "" {
+				msg = fmt.Sprintf("assertion failed: %s", cond)
+			} else if expanded, err := expandVars(map[string]string{"m": msg}, vars); err == nil {
+				msg = expanded["m"]
+			}
+			return Result{Host: label, Err: fmt.Errorf("%s", msg)}
+		}
+	}
+	msg := task.Params["success_msg"]
+	if msg == "" {
+		msg = fmt.Sprintf("all %d assertion(s) passed", len(conds))
+	} else if expanded, err := expandVars(map[string]string{"m": msg}, vars); err == nil {
+		msg = expanded["m"]
+	}
+	return Result{Host: label, Output: msg}
 }
 
 // runDebug renders a debug task: var=<name> prints one variable,

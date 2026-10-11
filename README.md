@@ -1176,6 +1176,43 @@ Examples:
   goaf -t host fetch src=/var/log/app.log dest=./logs/
 ```
 
+## Assert - declarable checks
+
+`assert` evaluates `that` conditions with full task vars (facts,
+registered, loop item). Failure carries `fail_msg`, success `success_msg`.
+
+```yaml
+    - name: Facts are present
+      assert:
+        that:
+          - '{{ne .goaf_os ""}}'
+          - '{{eq .env "prod"}}'
+        fail_msg: "expected prod, got {{.goaf_os}}/{{.env}}"
+        success_msg: "environment looks good"
+```
+
+## More modules - packages, files, system, info
+
+```bash
+  goaf -t host winget id=7zip.7zip [state=present|absent]   # Windows only
+  goaf -t host git repo=<url> dest=<path> [version=<v>] [update=true|false]
+  goaf -t host get_url url=<url> dest=<path> [checksum=sha256:<hex>]
+  goaf -t host unarchive src=<archive> dest=<dir> [creates=<sentinel>]
+  goaf -t host cron name=<n> job=<cmd> [minute=..] [state=present|absent]  # Unix
+  goaf -t host sysctl name=<k> [value=<v>] [state=present|absent]          # Linux
+  goaf -t host mount path=<dir> [src=<dev>] [state=mounted|unmounted|present|absent]  # Linux
+  goaf -t host hostname name=<name>
+  goaf -t host timezone name=<zone>   # Linux: Europe/Belgrade, Windows: Central European Standard Time
+  goaf -t host stat path=<path>       # info into register, never changes
+  goaf -t host slurp src=<file>       # base64 content into register
+  goaf -t host find paths=<dir> [patterns=*.log] [file_type=file|directory|any]
+  goaf -t host wait_for [port=<p>] [host=<h>] [path=<f>] [timeout=300] [delay=0]
+  goaf -t host pause [seconds=<n>] [prompt=<text>]
+```
+`stat`/`slurp`/`find`/`wait_for`/`pause` never report CHANGED (like
+`command` they run, but stay green). `sysctl`/`mount` need a privileged
+host (no unprivileged docker). `unarchive` without `creates` always runs.
+
 ## Plan file - review before apply
 
 Save a run (playbook + inventory + options snapshot), review it,
