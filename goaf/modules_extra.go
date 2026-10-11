@@ -83,6 +83,21 @@ func (m MetaModule) Check(_ Remote) (bool, error) {
 }
 func (m MetaModule) Apply(_ Remote) (string, error) { return "", nil }
 
+// ---------- assert pseudo-module ----------
+// Assert is control-side like debug: the runner evaluates `that`
+// conditions with full task vars. This stub only exists so ad-hoc mode
+// and validate accept the name (ad-hoc fails clearly: no vars context).
+
+type AssertModule struct {
+	Params map[string]string
+}
+
+func (m AssertModule) Name() string { return "assert" }
+func (m AssertModule) Check(_ Remote) (bool, error) {
+	return false, fmt.Errorf("assert is playbook-only (needs task variables)")
+}
+func (m AssertModule) Apply(_ Remote) (string, error) { return "", nil }
+
 // ---------- user module ----------
 // Manages local user accounts (needs privilege: sudo is used internally,
 // like the package modules).
