@@ -61,6 +61,9 @@ var knownModuleNames = []string{
 	"copy", "file", "service", "template", "setup",
 	"user", "lineinfile", "authorized_key", "reboot", "upgrade",
 	"debug", "set_fact", "script", "fetch", "meta",
+	"winget", "git", "get_url", "unarchive", "cron", "sysctl", "mount",
+	"hostname", "timezone", "stat", "slurp", "find", "wait_for", "pause",
+	"assert",
 }
 
 func loadPlaybook(path string) ([]Play, error) {
@@ -628,6 +631,20 @@ func taskParams(modName string, val interface{}) (map[string]string, error) {
 			return map[string]string{"action": v}, nil
 		case "debug", "set_fact":
 			// space-separated key=value pairs, e.g. "var=osline" or "a=1 b=2"
+			m := make(map[string]string)
+			for _, field := range strings.Fields(v) {
+				idx := strings.Index(field, "=")
+				if idx <= 0 {
+					return nil, fmt.Errorf("module %q: bad pair %q, want key=value", modName, field)
+				}
+				m[field[:idx]] = field[idx+1:]
+			}
+			return m, nil
+		case "assert":
+			// single condition string ("that: ...") or space-separated pairs
+			if !strings.Contains(v, "=") {
+				return map[string]string{"that": v}, nil
+			}
 			m := make(map[string]string)
 			for _, field := range strings.Fields(v) {
 				idx := strings.Index(field, "=")

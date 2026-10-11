@@ -185,6 +185,141 @@ var moduleRegistry = map[string]ModuleFactory{
 		// Real handling happens in the runner (merges into host vars).
 		return SetFactModule{Vars: p}, nil
 	},
+	"winget": func(p map[string]string) (Module, error) {
+		id, ok := p["id"]
+		if !ok {
+			id, ok = p["name"]
+		}
+		if !ok || id == "" {
+			return nil, fmt.Errorf("module 'winget' requires parameter 'id'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return WingetModule{ID: id, State: state}, nil
+	},
+	"git": func(p map[string]string) (Module, error) {
+		repo, ok := p["repo"]
+		if !ok {
+			return nil, fmt.Errorf("module 'git' requires parameter 'repo'")
+		}
+		dest, ok := p["dest"]
+		if !ok {
+			return nil, fmt.Errorf("module 'git' requires parameter 'dest'")
+		}
+		update := p["update"]
+		if update == "" {
+			update = "true"
+		}
+		return GitModule{Repo: repo, Dest: dest, Version: p["version"], Update: update}, nil
+	},
+	"get_url": func(p map[string]string) (Module, error) {
+		url, ok := p["url"]
+		if !ok {
+			return nil, fmt.Errorf("module 'get_url' requires parameter 'url'")
+		}
+		dest, ok := p["dest"]
+		if !ok {
+			return nil, fmt.Errorf("module 'get_url' requires parameter 'dest'")
+		}
+		return GetURLModule{URL: url, Dest: dest, Checksum: p["checksum"]}, nil
+	},
+	"unarchive": func(p map[string]string) (Module, error) {
+		src, ok := p["src"]
+		if !ok {
+			return nil, fmt.Errorf("module 'unarchive' requires parameter 'src'")
+		}
+		dest, ok := p["dest"]
+		if !ok {
+			return nil, fmt.Errorf("module 'unarchive' requires parameter 'dest'")
+		}
+		return UnarchiveModule{Src: src, Dest: dest, Creates: p["creates"]}, nil
+	},
+	"cron": func(p map[string]string) (Module, error) {
+		name, ok := p["name"]
+		if !ok {
+			return nil, fmt.Errorf("module 'cron' requires parameter 'name'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return CronModule{JobName: name, Job: p["job"], Minute: p["minute"],
+			Hour: p["hour"], Dom: p["dom"], Month: p["month"], Dow: p["dow"],
+			State: state, User: p["user"]}, nil
+	},
+	"sysctl": func(p map[string]string) (Module, error) {
+		name, ok := p["name"]
+		if !ok {
+			return nil, fmt.Errorf("module 'sysctl' requires parameter 'name'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "present"
+		}
+		return SysctlModule{Key: name, Value: p["value"], State: state, Persist: p["persist"]}, nil
+	},
+	"mount": func(p map[string]string) (Module, error) {
+		path, ok := p["path"]
+		if !ok {
+			return nil, fmt.Errorf("module 'mount' requires parameter 'path'")
+		}
+		state := p["state"]
+		if state == "" {
+			state = "mounted"
+		}
+		return MountModule{Src: p["src"], Path: path, Fstype: p["fstype"], Opts: p["opts"], State: state}, nil
+	},
+	"hostname": func(p map[string]string) (Module, error) {
+		name, ok := p["name"]
+		if !ok {
+			return nil, fmt.Errorf("module 'hostname' requires parameter 'name'")
+		}
+		return HostnameModule{Host: name}, nil
+	},
+	"timezone": func(p map[string]string) (Module, error) {
+		name, ok := p["name"]
+		if !ok {
+			return nil, fmt.Errorf("module 'timezone' requires parameter 'name'")
+		}
+		return TimezoneModule{Zone: name}, nil
+	},
+	"stat": func(p map[string]string) (Module, error) {
+		path, ok := p["path"]
+		if !ok {
+			return nil, fmt.Errorf("module 'stat' requires parameter 'path'")
+		}
+		return StatModule{Path: path}, nil
+	},
+	"slurp": func(p map[string]string) (Module, error) {
+		src, ok := p["src"]
+		if !ok {
+			return nil, fmt.Errorf("module 'slurp' requires parameter 'src'")
+		}
+		return SlurpModule{Src: src}, nil
+	},
+	"find": func(p map[string]string) (Module, error) {
+		paths, ok := p["paths"]
+		if !ok {
+			paths, ok = p["path"]
+		}
+		if !ok {
+			return nil, fmt.Errorf("module 'find' requires parameter 'paths'")
+		}
+		return FindModule{Paths: paths, Patterns: p["patterns"], FileType: p["file_type"]}, nil
+	},
+	"wait_for": func(p map[string]string) (Module, error) {
+		return WaitForModule{Port: p["port"], Host: p["host"], Path: p["path"],
+			Timeout: p["timeout"], Delay: p["delay"]}, nil
+	},
+	"pause": func(p map[string]string) (Module, error) {
+		return PauseModule{Seconds: p["seconds"], Prompt: p["prompt"]}, nil
+	},
+	"assert": func(p map[string]string) (Module, error) {
+		// Real handling happens in the runner (needs task vars).
+		return AssertModule{Params: p}, nil
+	},
 }
 
 // LookupModule returns the factory for the given module name, or false if not found.

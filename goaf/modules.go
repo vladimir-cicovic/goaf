@@ -22,6 +22,12 @@ type Differ interface {
 	Diff(s Remote) (string, error)
 }
 
+// NoChange marks info modules whose Apply never changes state
+// (stat, slurp, find, wait_for, pause): reported as ok with output.
+type NoChange interface {
+	NoChange() bool
+}
+
 // Module defines the contract for all operations.
 // Check reports whether a change is needed, without modifying state.
 // Apply executes the change and returns output.
@@ -58,6 +64,9 @@ func RunModule(host string, s Remote, mod Module, checkMode bool) Result {
 	out = strings.TrimSpace(out)
 	if err != nil {
 		return Result{Host: host, Output: out, Err: err}
+	}
+	if _, ok := mod.(NoChange); ok {
+		return Result{Host: host, Changed: false, Output: out}
 	}
 	return Result{Host: host, Changed: true, Output: out, Diff: diff}
 }
