@@ -1321,6 +1321,62 @@ roles/webapp/
   goaf -i inv.yml --roles-path=./roles run site.yml
 ```
 
+## No log - hide secrets
+
+`no_log: true` replaces task output (and diffs, which may render secrets)
+with `(output hidden by no_log)` in console and NDJSON. Registered
+variables keep the real value for later tasks.
+
+```yaml
+    - name: Use API token
+      command: "curl -H 'Authorization: Bearer {{.token}}' ..."
+      no_log: true
+```
+
+## Environment - vars for commands
+
+`environment:` on a play and/or task prefixes exports to every command
+(task wins). Exports land inside the privileged shell, so they survive
+`become` (and use the `$env:` form over WinRM).
+
+```yaml
+- name: Deploy
+  hosts: web
+  environment:
+    PLAY_ENV: play-value
+  tasks:
+    - name: Migrate
+      command: "echo $PLAY_ENV $TASK_ENV"
+      environment:
+        TASK_ENV: task-value
+```
+
+## Check mode per task - always or never dry-run
+
+`check_mode: false` applies the task even in a `-check` run;
+`check_mode: true` dry-runs it even in a normal run.
+
+```yaml
+    - name: Audit marker (always real)
+      command: "touch /tmp/audit-marker"
+      check_mode: false
+```
+
+## Listen - one handler, many topics
+
+Handlers run when notified by name or by any subscribed `listen` topic.
+
+```yaml
+  tasks:
+    - name: Deploy config
+      copy: {src: ./app.conf, dest: /etc/app.conf}
+      notify: app-topic
+  handlers:
+    - name: Reload app stack
+      listen: [app-topic, web-topic]
+      service: {name: app, state: restarted}
+```
+
 ## Include tasks - split files
 
 Splice an external task file (also inside roles; paths resolve relative

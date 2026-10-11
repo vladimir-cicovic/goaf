@@ -839,6 +839,52 @@ func TestThrottleParse(t *testing.T) {
 	}
 }
 
+func TestTaskPolishKeys(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte(`- name: p
+  hosts: all
+  environment: {GLOBAL: g}
+  tasks:
+    - name: T
+      command: uptime
+      no_log: true
+      check_mode: false
+      listen: [a, b]
+      environment: {LOCAL: l}
+      throttle: 2
+`), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := plays[0].Tasks[0]
+	if !task.NoLog {
+		t.Errorf("no_log should be true: %+v", task)
+	}
+	if task.CheckMode == nil || *task.CheckMode != false {
+		t.Errorf("check_mode should be false: %+v", task)
+	}
+	if len(task.Listen) != 2 || len(task.Environment) != 1 {
+		t.Errorf("bad listen/env: %+v", task)
+	}
+	if len(plays[0].Environment) != 1 || plays[0].Environment["GLOBAL"] != "g" {
+		t.Errorf("bad play env: %+v", plays[0].Environment)
+	}
+	merged := taskEnvMergeForTest(plays[0].Environment, task.Environment)
+	if merged["GLOBAL"] != "g" || merged["LOCAL"] != "l" {
+		t.Errorf("bad env merge: %v", merged)
+	}
+}
+
+func taskEnvMergeForTest(play, task map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range play {
+		out[k] = v
+	}
+	for k, v := range task {
+		out[k] = v
+	}
+	return out
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

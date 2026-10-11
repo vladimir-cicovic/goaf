@@ -602,6 +602,12 @@ func (c *listRunner) runSingle(task PlayTask, parentWhen []string, skip, only ma
 				}
 				c.registeredVars[r.Host][task.Register] = r.Output
 			}
+			// no_log hides output (and diffs, which may render secrets)
+			// from console/JSON; registered vars keep the real value.
+			if task.NoLog {
+				r.Output = "(output hidden by no_log)"
+				r.Diff = ""
+			}
 			n := applyResult(r, s)
 			if n > 0 {
 				c.addFailed(n)
@@ -646,7 +652,12 @@ func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) [
 		mkMod := func(h Host) (Module, error) {
 			return c.makeModule(task, h, item)
 		}
-		return runOnSessions(taskHosts, mkMod, c.sessions, c.connErrs, c.play.Become || c.opts.Become, c.opts.CheckMode, task.Throttle)
+		check := c.opts.CheckMode
+		if task.CheckMode != nil {
+			check = *task.CheckMode
+		}
+		sessions := wrapEnv(c.sessions, taskEnv(c.play, task))
+		return runOnSessions(taskHosts, mkMod, sessions, c.connErrs, c.play.Become || c.opts.Become, check, task.Throttle)
 	}
 }
 
@@ -957,6 +968,15 @@ func (c *listRunner) flushHandlers() int {
 	activeEmitter.HandlersRunning()
 	for _, handler := range c.play.Handlers {
 		triggered := c.notified[handler.Name]
+		if len(triggered) == 0 {
+			// Notify any listen topic the handler subscribes to.
+			for _, topic := range handler.Listen {
+				if len(c.notified[topic]) > 0 {
+					triggered = c.notified[topic]
+					break
+				}
+			}
+		}
 		if len(triggered) == 0 {
 			continue
 		}

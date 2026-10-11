@@ -924,6 +924,9 @@ func runValidate(playPath, invPath string) int {
 		handlers := map[string]bool{}
 		for _, h := range play.Handlers {
 			handlers[h.Name] = true
+			for _, topic := range h.Listen {
+				handlers[topic] = true
+			}
 		}
 		// Dummy context for validation: loop items, gathered facts,
 		// registered and set_fact names only exist at runtime — provide

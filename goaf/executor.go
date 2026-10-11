@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -53,6 +54,75 @@ func runOne(host Host, mod Module, become, checkMode bool) Result {
 	defer sess.Close()
 	sess.SetBecome(become)
 	return RunModule(sess.DisplayHost(), sess, mod, checkMode)
+}
+
+// EnvSession wraps a Remote and prefixes environment exports to every
+// command. Exports land inside the privileged shell under become, so they
+// survive escalation; on WinRM the PowerShell form is used.
+type EnvSession struct {
+	Remote
+	env map[string]string
+}
+
+// taskEnv merges play and task environment (task wins).
+func taskEnv(play Play, task PlayTask) map[string]string {
+	if len(play.Environment) == 0 && len(task.Environment) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(play.Environment)+len(task.Environment))
+	for k, v := range play.Environment {
+		out[k] = v
+	}
+	for k, v := range task.Environment {
+		out[k] = v
+	}
+	return out
+}
+
+// wrapEnv wraps sessions with environment exports (nil-safe passthrough).
+func wrapEnv(sessions map[string]Remote, env map[string]string) map[string]Remote {
+	if len(env) == 0 {
+		return sessions
+	}
+	out := make(map[string]Remote, len(sessions))
+	for k, s := range sessions {
+		out[k] = EnvSession{Remote: s, env: env}
+	}
+	return out
+}
+
+// unwrapSession strips EnvSession wrappers to the real transport.
+func unwrapSession(s Remote) Remote {
+	if e, ok := s.(EnvSession); ok {
+		return e.Remote
+	}
+	return s
+}
+
+// Run implements Remote with environment exports prefixed.
+func (s EnvSession) Run(cmd string) (string, error) {
+	if len(s.env) == 0 {
+		return s.Remote.Run(cmd)
+	}
+	keys := make([]string, 0, len(s.env))
+	for k := range s.env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if _, ok := s.Remote.(*WinRMSession); ok {
+		var b strings.Builder
+		for _, k := range keys {
+			b.WriteString("$env:" + k + "=" + psQuote(s.env[k]) + "; ")
+		}
+		return s.Remote.Run(b.String() + cmd)
+	}
+	var b strings.Builder
+	b.WriteString("export")
+	for _, k := range keys {
+		b.WriteString(" " + k + "=" + shQuote(s.env[k]))
+	}
+	b.WriteString("; " + cmd)
+	return s.Remote.Run(b.String())
 }
 
 // runLocalCommand executes a shell command on the control node and returns
