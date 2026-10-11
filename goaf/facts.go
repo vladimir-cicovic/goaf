@@ -48,50 +48,79 @@ func GatherFactsAll(hosts []Host, parallelism int) map[string]Facts {
 }
 
 func gatherOne(sess Remote) Facts {
+	return gatherOneSubsets(sess, nil)
+}
+
+// filterFacts keeps only keys in the wanted subsets (empty = all).
+func filterFacts(facts Facts, subsets []string) Facts {
+	if len(subsets) == 0 {
+		return facts
+	}
+	out := Facts{}
+	for k, v := range facts {
+		if factSubset(k, subsets) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func gatherOneSubsets(sess Remote, subsets []string) Facts {
 	if isWinRM(sess) {
-		return gatherWindows(sess)
+		return gatherWindows(sess, subsets)
 	}
 	facts := Facts{}
+	want := func(key string) bool { return factSubset(key, subsets) }
 
 	// Hostname via /proc — no hostname binary required.
-	if out, err := sess.Run("cat /proc/sys/kernel/hostname 2>/dev/null"); err == nil {
-		facts["goaf_hostname"] = strings.TrimSpace(out)
+	if want("goaf_hostname") {
+		if out, err := sess.Run("cat /proc/sys/kernel/hostname 2>/dev/null"); err == nil {
+			facts["goaf_hostname"] = strings.TrimSpace(out)
+		}
 	}
 
-	if out, err := sess.Run("uname -m 2>/dev/null"); err == nil {
-		facts["goaf_arch"] = strings.TrimSpace(out)
+	if want("goaf_arch") {
+		if out, err := sess.Run("uname -m 2>/dev/null"); err == nil {
+			facts["goaf_arch"] = strings.TrimSpace(out)
+		}
 	}
 
-	if out, err := sess.Run("uname -r 2>/dev/null"); err == nil {
-		facts["goaf_kernel"] = strings.TrimSpace(out)
+	if want("goaf_kernel") {
+		if out, err := sess.Run("uname -r 2>/dev/null"); err == nil {
+			facts["goaf_kernel"] = strings.TrimSpace(out)
+		}
 	}
 
 	// Primary IP: try ip route, fall back to ip addr.
-	ipCmd := "ip route get 1.1.1.1 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1)}'"
-	if out, err := sess.Run(ipCmd); err == nil {
-		if ip := strings.TrimSpace(out); ip != "" {
-			facts["goaf_ip"] = ip
-		}
-	}
-	if _, ok := facts["goaf_ip"]; !ok {
-		fallback := "ip -4 addr show scope global 2>/dev/null | awk '/inet/{gsub(/\\/[0-9]+/,\"\",$2); print $2; exit}'"
-		if out, err := sess.Run(fallback); err == nil {
+	if want("goaf_ip") {
+		ipCmd := "ip route get 1.1.1.1 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1)}'"
+		if out, err := sess.Run(ipCmd); err == nil {
 			if ip := strings.TrimSpace(out); ip != "" {
 				facts["goaf_ip"] = ip
+			}
+		}
+		if _, ok := facts["goaf_ip"]; !ok {
+			fallback := "ip -4 addr show scope global 2>/dev/null | awk '/inet/{gsub(/\\/[0-9]+/,\"\",$2); print $2; exit}'"
+			if out, err := sess.Run(fallback); err == nil {
+				if ip := strings.TrimSpace(out); ip != "" {
+					facts["goaf_ip"] = ip
+				}
 			}
 		}
 	}
 
 	// OS identification from /etc/os-release.
-	if out, err := sess.Run("cat /etc/os-release 2>/dev/null"); err == nil {
-		parseOSRelease(out, facts)
+	if want("goaf_os") {
+		if out, err := sess.Run("cat /etc/os-release 2>/dev/null"); err == nil {
+			parseOSRelease(out, facts)
+		}
 	}
 
 	return facts
 }
 
 // gatherWindows collects facts from a Windows host via PowerShell.
-func gatherWindows(sess Remote) Facts {
+func gatherWindows(sess Remote, subsets []string) Facts {
 	facts := Facts{
 		"goaf_os":        "windows",
 		"goaf_os_name":   "Windows",
@@ -104,28 +133,41 @@ func gatherWindows(sess Remote) Facts {
 		}
 		return strings.TrimSpace(out)
 	}
-	if v := run("$env:COMPUTERNAME"); v != "" {
-		facts["goaf_hostname"] = v
-	}
-	if v := run("$env:PROCESSOR_ARCHITECTURE"); v != "" {
-		facts["goaf_arch"] = map[string]string{
-			"AMD64": "amd64", "ARM64": "arm64", "x86": "386",
-		}[v]
-		if facts["goaf_arch"] == "" {
-			facts["goaf_arch"] = v
+	want := func(key string) bool { return factSubset(key, subsets) }
+	if want("goaf_hostname") {
+		if v := run("$env:COMPUTERNAME"); v != "" {
+			facts["goaf_hostname"] = v
 		}
 	}
-	if v := run("[System.Environment]::OSVersion.Version.ToString()"); v != "" {
-		facts["goaf_kernel"] = v
+	if want("goaf_arch") {
+		if v := run("$env:PROCESSOR_ARCHITECTURE"); v != "" {
+			facts["goaf_arch"] = map[string]string{
+				"AMD64": "amd64", "ARM64": "arm64", "x86": "386",
+			}[v]
+			if facts["goaf_arch"] == "" {
+				facts["goaf_arch"] = v
+			}
+		}
 	}
-	if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').ProductName"); v != "" {
-		facts["goaf_os_name"] = v
+	if want("goaf_kernel") {
+		if v := run("[System.Environment]::OSVersion.Version.ToString()"); v != "" {
+			facts["goaf_kernel"] = v
+		}
 	}
-	if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').CurrentBuild"); v != "" {
-		facts["goaf_os_version"] = v
+	if want("goaf_os_name") {
+		if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').ProductName"); v != "" {
+			facts["goaf_os_name"] = v
+		}
 	}
-	if v := run("(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.AddressState -eq 'Preferred' } | Select-Object -First 1 -ExpandProperty IPAddress)"); v != "" {
-		facts["goaf_ip"] = v
+	if want("goaf_os_version") {
+		if v := run("(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').CurrentBuild"); v != "" {
+			facts["goaf_os_version"] = v
+		}
+	}
+	if want("goaf_ip") {
+		if v := run("(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.AddressState -eq 'Preferred' } | Select-Object -First 1 -ExpandProperty IPAddress)"); v != "" {
+			facts["goaf_ip"] = v
+		}
 	}
 	return facts
 }

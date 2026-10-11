@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,13 +56,47 @@ func main() {
 	factsTTLStr := ""
 	flushCache := false
 	askConfirm := false
+	forceFlag := false
+	invExplicit := false
 	modulesPathFlag := "modules"
 	modulesPathExplicit := false
 	workspaceFlag := ""
+	invPath := flag.String("i", "inventory.yml", "path to inventory file")
+	target := flag.String("t", "", "target group or host (e.g. web or 10.0.0.1:2222)")
+	parallel := flag.Int("p", 10, "max number of parallel connections")
+	reportPath := flag.String("report", "", "write run report to this path (.json or .html)")
+	// Value flags (-i/-t/-p/-report, space or = form) are consumed here via
+	// flag.Set: Go's flag.Parse stops at the first positional argument, so
+	// late flags like `apply plan.json -i live.yml` would otherwise be lost.
+	consumeValueFlag := func(name, val string, hasVal bool, idx *int, args []string) bool {
+		take := func(v string) {
+			_ = flag.Set(name, v)
+		}
+		if hasVal {
+			take(val)
+			return true
+		}
+		if *idx+1 < len(args) && !strings.HasPrefix(args[*idx+1], "-") {
+			*idx++
+			take(args[*idx])
+			return true
+		}
+		return false
+	}
+	rawArgs := os.Args[1:]
 	filtered := os.Args[:1]
-	for _, a := range os.Args[1:] {
+	for i := 0; i < len(rawArgs); i++ {
+		a := rawArgs[i]
 		name, val, hasVal := splitFlag(a)
 		switch name {
+		case "i", "t", "p", "report":
+			if name == "i" {
+				invExplicit = true
+			}
+			if !consumeValueFlag(name, val, hasVal, &i, rawArgs) {
+				filtered = append(filtered, a)
+			}
+			continue
 		case "check":
 			checkMode = true
 		case "json":
@@ -114,6 +149,8 @@ func main() {
 			}
 		case "flush-cache":
 			flushCache = true
+		case "force":
+			forceFlag = true
 		case "confirm":
 			askConfirm = true
 		case "roles-path":
@@ -146,10 +183,6 @@ func main() {
 	vaultPassFile = vaultPassFileFlag
 	vaultAskPass = askVaultPass
 
-	invPath := flag.String("i", "inventory.yml", "path to inventory file")
-	target := flag.String("t", "", "target group or host (e.g. web or 10.0.0.1:2222)")
-	parallel := flag.Int("p", 10, "max number of parallel connections")
-	reportPath := flag.String("report", "", "write run report to this path (.json or .html)")
 	flag.Parse()
 
 	if askBecomePass && os.Getenv("GOAF_BECOME_PASSWORD") == "" {
@@ -284,13 +317,18 @@ func main() {
 		return
 	}
 
-	// apply: run a saved plan file (playbook + inventory + options snapshot)
+	// apply: run a saved plan file (playbook + inventory + options snapshot).
+	// -i live.yml overrides the embedded inventory (drift-checked unless --force).
 	if args[0] == "apply" {
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: goaf apply <plan.json> [--check]")
+			fmt.Fprintln(os.Stderr, "usage: goaf apply <plan.json> [-i live.yml] [--check] [--force]")
 			os.Exit(1)
 		}
-		if code := runApply(args[1], *parallel, checkMode, *reportPath, askConfirm); code != 0 {
+		invOverride := ""
+		if invExplicit {
+			invOverride = *invPath
+		}
+		if code := runApply(args[1], *parallel, checkMode, *reportPath, askConfirm, forceFlag, invOverride); code != 0 {
 			os.Exit(code)
 		}
 		return
@@ -349,7 +387,7 @@ func main() {
 			os.Exit(3)
 		}
 		if savePlan != "" {
-			if err := savePlanFile(savePlan, args[1], *invPath, opts, becomeMode); err != nil {
+			if err := savePlanFile(savePlan, args[1], *invPath, plays, inv, opts, becomeMode); err != nil {
 				fmt.Fprintf(os.Stderr, "error saving plan: %v\n", err)
 				os.Exit(1)
 			}
@@ -723,23 +761,24 @@ func parseFactsTTL(s string) int {
 // runPlan is a saved playbook run: playbook + inventory contents and the
 // run options, so `apply` reproduces the exact same run later.
 type runPlan struct {
-	Version       int      `json:"version"`
-	Created       string   `json:"created"`
-	PlaybookName  string   `json:"playbook"`
-	PlaybookB64   string   `json:"playbook_b64"`
-	InventoryName string   `json:"inventory"`
-	InventoryB64  string   `json:"inventory_b64"`
-	Parallelism   int      `json:"parallelism"`
-	Become        bool     `json:"become"`
-	Tags          []string `json:"tags"`
-	SkipTags      []string `json:"skip_tags"`
-	Limit         string   `json:"limit"`
-	Serial        int      `json:"serial"`
-	SerialPct     int      `json:"serial_pct"`
+	Version       int                 `json:"version"`
+	Created       string              `json:"created"`
+	PlaybookName  string              `json:"playbook"`
+	PlaybookB64   string              `json:"playbook_b64"`
+	InventoryName string              `json:"inventory"`
+	InventoryB64  string              `json:"inventory_b64"`
+	Parallelism   int                 `json:"parallelism"`
+	Become        bool                `json:"become"`
+	Tags          []string            `json:"tags"`
+	SkipTags      []string            `json:"skip_tags"`
+	Limit         string              `json:"limit"`
+	Serial        int                 `json:"serial"`
+	SerialPct     int                 `json:"serial_pct"`
+	PlayHosts     map[string][]string `json:"play_hosts"`
 }
 
 // savePlanFile snapshots the playbook/inventory files and run options.
-func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bool) error {
+func savePlanFile(path, playbookPath, invPath string, plays []Play, inv *Inventory, opts RunOptions, become bool) error {
 	pbData, err := os.ReadFile(playbookPath)
 	if err != nil {
 		return err
@@ -747,6 +786,20 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 	invData, err := os.ReadFile(invPath)
 	if err != nil {
 		return err
+	}
+	hostSets := make(map[string][]string, len(plays))
+	for _, play := range plays {
+		hosts, err := inv.Resolve(play.Hosts)
+		if err != nil {
+			hostSets[play.Name] = nil
+			continue
+		}
+		labels := make([]string, 0, len(hosts))
+		for _, h := range hosts {
+			labels = append(labels, hostLabel(h))
+		}
+		sort.Strings(labels)
+		hostSets[play.Name] = labels
 	}
 	plan := runPlan{
 		Version:       1,
@@ -762,6 +815,7 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 		Limit:         opts.Limit,
 		Serial:        opts.Serial,
 		SerialPct:     opts.SerialPct,
+		PlayHosts:     hostSets,
 	}
 	data, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
@@ -770,8 +824,43 @@ func savePlanFile(path, playbookPath, invPath string, opts RunOptions, become bo
 	return os.WriteFile(path, data, 0o644)
 }
 
+// checkPlanHosts compares current inventory resolution against the host
+// sets snapshotted at plan time. Returns true when anything differs.
+func checkPlanHosts(plan runPlan, plays []Play, inv *Inventory) bool {
+	drifted := false
+	for _, play := range plays {
+		hosts, err := inv.Resolve(play.Hosts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "plan drift: play %q hosts no longer resolve: %v\n", play.Name, err)
+			drifted = true
+			continue
+		}
+		labels := make([]string, 0, len(hosts))
+		for _, h := range hosts {
+			labels = append(labels, hostLabel(h))
+		}
+		sort.Strings(labels)
+		want := plan.PlayHosts[play.Name]
+		if len(labels) != len(want) {
+			fmt.Fprintf(os.Stderr, "plan drift: play %q hosts changed %v -> %v\n", play.Name, want, labels)
+			drifted = true
+			continue
+		}
+		for i := range labels {
+			if labels[i] != want[i] {
+				fmt.Fprintf(os.Stderr, "plan drift: play %q hosts changed %v -> %v\n", play.Name, want, labels)
+				drifted = true
+				break
+			}
+		}
+	}
+	return drifted
+}
+
 // runApply executes a saved plan file. --check forces dry-run on top.
-func runApply(planPath string, parallel int, forceCheck bool, reportPath string, askConfirm bool) int {
+// invOverride (from explicit -i) replaces the embedded inventory after a
+// drift check (skipped with --force).
+func runApply(planPath string, parallel int, forceCheck bool, reportPath string, askConfirm bool, forceApply bool, invOverride string) int {
 	started := time.Now()
 	_ = parallel
 	raw, err := os.ReadFile(planPath)
@@ -819,10 +908,24 @@ func runApply(planPath string, parallel int, forceCheck bool, reportPath string,
 		fmt.Fprintf(os.Stderr, "error loading plan inventory: %v\n", err)
 		return 1
 	}
+	if invOverride != "" {
+		live, err := LoadInventory(invOverride)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading override inventory: %v\n", err)
+			return 1
+		}
+		inv = live
+	}
 	plays, err := loadPlaybook(pbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading plan playbook: %v\n", err)
 		return 1
+	}
+	if !forceApply && len(plan.PlayHosts) > 0 {
+		if drifted := checkPlanHosts(plan, plays, inv); drifted {
+			fmt.Fprintln(os.Stderr, "plan drifted: inventory hosts changed since planning (use --force to apply anyway)")
+			return 2
+		}
 	}
 	if askConfirm && !confirmRun(plays, inv, plan.Limit) {
 		fmt.Fprintln(os.Stderr, "aborted by user")
@@ -1028,7 +1131,7 @@ func usage() {
 	fmt.Println("  goaf [-check] [-json] [-diff] -i inventory.yml run <playbook.yml>")
 	fmt.Println("  goaf -i inventory.yml validate <playbook.yml>")
 	fmt.Println("  goaf -i inventory.yml run <playbook.yml> --save-plan=<plan.json>")
-	fmt.Println("  goaf apply <plan.json> [--check]")
+	fmt.Println("  goaf apply <plan.json> [-i live.yml] [--check] [--force]")
 	fmt.Println("  goaf vault encrypt|decrypt [value|-]")
 	fmt.Println("  goaf -i inventory.yml drift [--fix]")
 	fmt.Println("  goaf state list [host]")
@@ -1057,6 +1160,7 @@ func usage() {
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")
 	fmt.Println("  --flush-cache      ignore cached facts and refresh them")
 	fmt.Println("  --confirm          ask [y/N] before applying a playbook run")
+	fmt.Println("  --force            apply a drifted plan anyway")
 	fmt.Println("  --modules-path=<dir>  external modules dir (default ./modules if present)")
 	fmt.Println("  --roles-path=<dir>    roles base dir (default ./roles if present)")
 	fmt.Println("  --workspace=<name>    environment vars from workspaces/<name>.yml")

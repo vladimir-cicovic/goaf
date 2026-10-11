@@ -35,37 +35,42 @@ type Play struct {
 	Outputs map[string]string `yaml:"output"`
 	// Environment adds env vars to every task command (task wins).
 	Environment map[string]string `yaml:"environment"`
+	// GatherSubsets limits fact modules: os, hardware, network, all, min.
+	GatherSubsets []string `yaml:"-"`
+	// IgnoreUnreachable skips unreachable hosts instead of failing them.
+	IgnoreUnreachable bool `yaml:"-"`
 	// Strategy "free" runs each host through all tasks independently
 	// (default "linear": task barrier across hosts).
 	Strategy string `yaml:"strategy"`
 }
 
 type PlayTask struct {
-	Name        string
-	Module      string // "block" for block items (see Block/Rescue/Always)
-	Params      map[string]string
-	When        string            // Go template expression; skip task if evaluates to false/0/no/empty
-	Loop        []string          // iterate task over each item, available as {{.item}}
-	Notify      string            // handler name to trigger if this task changed something
-	Register    string            // save task output into a per-host variable for later tasks
-	FailedWhen  string            // Go template over vars+facts+result; mark failed when true
-	ChangedWhen string            // Go template over vars+facts+result; override changed when set
-	IgnoreErrs  bool              // continue the play when this task fails
-	Tags        []string          // task tags for --tags/--skip-tags filtering
-	Block       []PlayTask        // block: section (Module == "block")
-	Rescue      []PlayTask        // run on hosts where block tasks failed
-	Always      []PlayTask        // always run, regardless of block/rescue outcome
-	RunOnce     bool              // run only on the first host
-	DelegateTo  string            // "localhost" runs a command task locally (other modules error)
-	Retries     int               // extra attempts after the first (total = 1 + retries)
-	Delay       int               // seconds between retries
-	Until       string            // Go template over vars+facts+result; retry until true
-	RoleDir     string            // set for tasks from a role (resolves files//templates/)
-	Throttle    int               // max parallel hosts for this task (0 = play default)
-	NoLog       bool              // hide task output (secrets) in console/JSON
-	Environment map[string]string // extra env vars for task commands
-	CheckMode   *bool             // override global check mode for this task
-	Listen      []string          // handler topics: notify any of these triggers it
+	Name              string
+	Module            string // "block" for block items (see Block/Rescue/Always)
+	Params            map[string]string
+	When              string            // Go template expression; skip task if evaluates to false/0/no/empty
+	Loop              []string          // iterate task over each item, available as {{.item}}
+	Notify            string            // handler name to trigger if this task changed something
+	Register          string            // save task output into a per-host variable for later tasks
+	FailedWhen        string            // Go template over vars+facts+result; mark failed when true
+	ChangedWhen       string            // Go template over vars+facts+result; override changed when set
+	IgnoreErrs        bool              // continue the play when this task fails
+	Tags              []string          // task tags for --tags/--skip-tags filtering
+	Block             []PlayTask        // block: section (Module == "block")
+	Rescue            []PlayTask        // run on hosts where block tasks failed
+	Always            []PlayTask        // always run, regardless of block/rescue outcome
+	RunOnce           bool              // run only on the first host
+	DelegateTo        string            // "localhost" runs a command task locally (other modules error)
+	Retries           int               // extra attempts after the first (total = 1 + retries)
+	Delay             int               // seconds between retries
+	Until             string            // Go template over vars+facts+result; retry until true
+	RoleDir           string            // set for tasks from a role (resolves files//templates/)
+	Throttle          int               // max parallel hosts for this task (0 = play default)
+	NoLog             bool              // hide task output (secrets) in console/JSON
+	Environment       map[string]string // extra env vars for task commands
+	CheckMode         *bool             // override global check mode for this task
+	Listen            []string          // handler topics: notify any of these triggers it
+	IgnoreUnreachable bool              // unreachable hosts are skipped, not failed
 }
 
 var knownModuleNames = []string{
@@ -92,23 +97,25 @@ func loadPlaybookBytes(data []byte, dir, rolesDir string) ([]Play, error) {
 
 // rawPlay mirrors one play for YAML decoding.
 type rawPlay struct {
-	Name        string                   `yaml:"name"`
-	Hosts       string                   `yaml:"hosts"`
-	Become      bool                     `yaml:"become"`
-	Vars        map[string]string        `yaml:"vars"`
-	GatherFacts *bool                    `yaml:"gather_facts"`
-	PreTasks    []map[string]interface{} `yaml:"pre_tasks"`
-	Tasks       []map[string]interface{} `yaml:"tasks"`
-	PostTasks   []map[string]interface{} `yaml:"post_tasks"`
-	Handlers    []map[string]interface{} `yaml:"handlers"`
-	Roles       []interface{}            `yaml:"roles"`
-	MaxFailPct  *int                     `yaml:"max_fail_percentage"`
-	AnyErrors   *bool                    `yaml:"any_errors_fatal"`
-	Outputs     map[string]string        `yaml:"output"`
-	VarsFiles   []string                 `yaml:"vars_files"`
-	VarsPrompt  []interface{}            `yaml:"vars_prompt"`
-	Strategy    string                   `yaml:"strategy"`
-	Environment map[string]interface{}   `yaml:"environment"`
+	Name              string                   `yaml:"name"`
+	Hosts             string                   `yaml:"hosts"`
+	Become            bool                     `yaml:"become"`
+	Vars              map[string]string        `yaml:"vars"`
+	GatherFacts       *bool                    `yaml:"gather_facts"`
+	PreTasks          []map[string]interface{} `yaml:"pre_tasks"`
+	Tasks             []map[string]interface{} `yaml:"tasks"`
+	PostTasks         []map[string]interface{} `yaml:"post_tasks"`
+	Handlers          []map[string]interface{} `yaml:"handlers"`
+	Roles             []interface{}            `yaml:"roles"`
+	MaxFailPct        *int                     `yaml:"max_fail_percentage"`
+	AnyErrors         *bool                    `yaml:"any_errors_fatal"`
+	Outputs           map[string]string        `yaml:"output"`
+	VarsFiles         []string                 `yaml:"vars_files"`
+	VarsPrompt        []interface{}            `yaml:"vars_prompt"`
+	Strategy          string                   `yaml:"strategy"`
+	GatherSubsets     interface{}              `yaml:"gather_subset"`
+	IgnoreUnreachable *bool                    `yaml:"ignore_unreachable"`
+	Environment       map[string]interface{}   `yaml:"environment"`
 }
 
 func loadPlaybookDepth(data []byte, dir, rolesDir string, depth int) ([]Play, error) {
@@ -211,6 +218,14 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 	if rp.Strategy != "" && rp.Strategy != "linear" && rp.Strategy != "free" {
 		return Play{}, fmt.Errorf("play %q: unknown strategy %q (want linear|free)", rp.Name, rp.Strategy)
 	}
+	subsets, err := parseGatherSubsets(rp.Name, rp.GatherSubsets)
+	if err != nil {
+		return Play{}, err
+	}
+	ignoreUnreachable := false
+	if rp.IgnoreUnreachable != nil {
+		ignoreUnreachable = *rp.IgnoreUnreachable
+	}
 	// Decrypt $GOAFVAULT play vars up front so {{.var}} references
 	// expand to plaintext. Without a password the envelope is kept
 	// and fails later with a clear error when actually used.
@@ -239,21 +254,23 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 		return Play{}, fmt.Errorf("play %q: %w", rp.Name, err)
 	}
 	return Play{
-		Name:           rp.Name,
-		Hosts:          rp.Hosts,
-		Become:         rp.Become,
-		Vars:           vars,
-		PreTasks:       preTasks,
-		Tasks:          tasks,
-		PostTasks:      postTasks,
-		Handlers:       handlers,
-		GatherFacts:    gatherFacts,
-		MaxFailPct:     rp.MaxFailPct,
-		AnyErrorsFatal: anyFatal,
-		Outputs:        rp.Outputs,
-		VarsPrompt:     prompts,
-		Strategy:       rp.Strategy,
-		Environment:    playEnv,
+		Name:              rp.Name,
+		Hosts:             rp.Hosts,
+		Become:            rp.Become,
+		Vars:              vars,
+		PreTasks:          preTasks,
+		Tasks:             tasks,
+		PostTasks:         postTasks,
+		Handlers:          handlers,
+		GatherFacts:       gatherFacts,
+		MaxFailPct:        rp.MaxFailPct,
+		AnyErrorsFatal:    anyFatal,
+		Outputs:           rp.Outputs,
+		VarsPrompt:        prompts,
+		Strategy:          rp.Strategy,
+		Environment:       playEnv,
+		GatherSubsets:     subsets,
+		IgnoreUnreachable: ignoreUnreachable,
 	}, nil
 }
 
@@ -552,6 +569,10 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 	if v, ok := raw["ignore_errors"]; ok {
 		ignoreErrs = fmt.Sprintf("%v", v) == "true"
 	}
+	ignoreUnreachable := false
+	if v, ok := raw["ignore_unreachable"]; ok {
+		ignoreUnreachable = fmt.Sprintf("%v", v) == "true"
+	}
 
 	runOnce := false
 	if v, ok := raw["run_once"]; ok {
@@ -709,27 +730,28 @@ func parseOneTask(raw map[string]interface{}, baseDir string) (PlayTask, error) 
 			}, nil
 		}
 		return PlayTask{
-			Name:        name,
-			Module:      modName,
-			Params:      params,
-			When:        when,
-			Loop:        loop,
-			Notify:      notify,
-			Register:    register,
-			FailedWhen:  failedWhen,
-			ChangedWhen: changedWhen,
-			IgnoreErrs:  ignoreErrs,
-			Tags:        tags,
-			RunOnce:     runOnce,
-			DelegateTo:  delegateTo,
-			Retries:     retries,
-			Delay:       delay,
-			Until:       until,
-			Throttle:    throttle,
-			NoLog:       noLog,
-			Environment: env,
-			CheckMode:   checkMode,
-			Listen:      listen,
+			Name:              name,
+			Module:            modName,
+			Params:            params,
+			When:              when,
+			Loop:              loop,
+			Notify:            notify,
+			Register:          register,
+			FailedWhen:        failedWhen,
+			ChangedWhen:       changedWhen,
+			IgnoreErrs:        ignoreErrs,
+			IgnoreUnreachable: ignoreUnreachable,
+			Tags:              tags,
+			RunOnce:           runOnce,
+			DelegateTo:        delegateTo,
+			Retries:           retries,
+			Delay:             delay,
+			Until:             until,
+			Throttle:          throttle,
+			NoLog:             noLog,
+			Environment:       env,
+			CheckMode:         checkMode,
+			Listen:            listen,
 		}, nil
 	}
 	return PlayTask{}, fmt.Errorf("task %q: no known module key found (expected one of: %s)",
@@ -921,6 +943,66 @@ type PromptSpec struct {
 	Prompt  string
 	Private bool
 	Default string
+}
+
+// parseGatherSubsets parses gather_subset (string list or YAML list).
+// Valid: os, hardware, network, all, min. Empty means all.
+func parseGatherSubsets(playName string, v interface{}) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var out []string
+	switch t := v.(type) {
+	case string:
+		for _, s := range strings.Split(t, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+	default:
+		return nil, fmt.Errorf("play %q: gather_subset must be a string or list", playName)
+	}
+	for _, s := range out {
+		switch s {
+		case "os", "hardware", "network", "all", "min":
+		default:
+			return nil, fmt.Errorf("play %q: unknown gather subset %q (want os|hardware|network|all|min)", playName, s)
+		}
+	}
+	return out, nil
+}
+
+// factSubset reports whether a fact key belongs to the wanted subsets.
+// Empty subsets mean all.
+func factSubset(key string, subsets []string) bool {
+	if len(subsets) == 0 {
+		return true
+	}
+	groups := map[string][]string{
+		"os":       {"goaf_os", "goaf_os_name", "goaf_os_version", "goaf_os_family"},
+		"hardware": {"goaf_arch", "goaf_kernel"},
+		"network":  {"goaf_hostname", "goaf_ip"},
+	}
+	want := map[string]bool{}
+	for _, s := range subsets {
+		switch s {
+		case "all":
+			return true
+		case "min":
+			want["goaf_hostname"] = true
+			want["goaf_os"] = true
+			want["goaf_os_family"] = true
+		default:
+			for _, k := range groups[s] {
+				want[k] = true
+			}
+		}
+	}
+	return want[key]
 }
 
 // parseVarsPrompt parses vars_prompt entries (list of maps with name).

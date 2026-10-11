@@ -1222,7 +1222,11 @@ apply the exact same run later — optionally as dry-run.
   goaf -i inv.yml run site.yml --save-plan=v2.plan
   goaf apply v2.plan
   goaf apply v2.plan --check
+  goaf apply v2.plan -i live.yml            # promote to another inventory
+  goaf apply v2.plan -i live.yml --force    # ...even when hosts drifted
 ```
+Apply aborts when the live inventory resolves different hosts than at
+planning time (flags may sit anywhere: `apply` reads late `-i` too).
 
 ## Dynamic inventory - hosts from a script
 

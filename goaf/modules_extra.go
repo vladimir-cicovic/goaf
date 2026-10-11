@@ -516,6 +516,7 @@ func (m RebootModule) timeout() int {
 func (m RebootModule) Check(_ Remote) (bool, error) { return true, nil }
 
 func (m RebootModule) Apply(s Remote) (string, error) {
+	s = unwrapSession(s)
 	if w, ok := s.(*WinRMSession); ok {
 		return m.applyWin(w)
 	}
