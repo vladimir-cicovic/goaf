@@ -320,6 +320,12 @@ var moduleRegistry = map[string]ModuleFactory{
 		// Real handling happens in the runner (needs task vars).
 		return AssertModule{Params: p}, nil
 	},
+	"group_by": func(p map[string]string) (Module, error) {
+		return GroupByModule{Params: p}, nil
+	},
+	"add_host": func(p map[string]string) (Module, error) {
+		return AddHostModule{Params: p}, nil
+	},
 }
 
 // LookupModule returns the factory for the given module name, or false if not found.

@@ -1,0 +1,44 @@
+# Fast-batch demo: vars_files/prompts, strategy free, throttle,
+# group_by/add_host, import_playbook (plus assert/debug/set_fact).
+# Needs group "debian"; adapt the suse address below to your lab
+# (it is added dynamically to show add_host reaching a fresh host).
+- import_playbook: fast-imported.yml
+
+- name: Fast features demo
+  hosts: debian
+  strategy: free
+  vars_files:
+    - fast-vars.yml
+  vars_prompt:
+    - {name: decolor, prompt: "Favorite color?", default: blue}
+  tasks:
+    - name: Vars layers
+      debug: {msg: "file={{.common_var}} prompt={{.decolor}}"}
+
+    - name: Group by os
+      group_by: {key: "demo-{{.goaf_os_family}}"}
+
+    - name: Add suse dynamically
+      add_host: {name: 192.168.152.10:2223, groups: dyn-suse, note: added}
+
+    - name: Throttled command
+      command: "echo throttled-{{.goaf_os_family}}"
+      throttle: 1
+      register: fam
+
+    - name: Family known
+      assert: {that: '{{ne .fam ""}}'}
+
+- name: Dynamic group demo
+  hosts: demo-debian
+  gather_facts: false
+  tasks:
+    - name: Dynamic member here
+      command: "echo dynamic-group-ok"
+
+- name: Dynamic host demo
+  hosts: dyn-suse
+  gather_facts: false
+  tasks:
+    - name: Dynamic host here
+      command: "echo dynamic-host-ok"

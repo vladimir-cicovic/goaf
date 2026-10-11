@@ -98,6 +98,30 @@ func (m AssertModule) Check(_ Remote) (bool, error) {
 }
 func (m AssertModule) Apply(_ Remote) (string, error) { return "", nil }
 
+// ---------- group_by / add_host pseudo-modules ----------
+// Both are control-side like debug: the runner mutates the inventory.
+// Stubs exist so ad-hoc mode and validate accept the names.
+
+type GroupByModule struct {
+	Params map[string]string
+}
+
+func (m GroupByModule) Name() string { return "group_by" }
+func (m GroupByModule) Check(_ Remote) (bool, error) {
+	return false, fmt.Errorf("group_by is playbook-only (needs inventory)")
+}
+func (m GroupByModule) Apply(_ Remote) (string, error) { return "", nil }
+
+type AddHostModule struct {
+	Params map[string]string
+}
+
+func (m AddHostModule) Name() string { return "add_host" }
+func (m AddHostModule) Check(_ Remote) (bool, error) {
+	return false, fmt.Errorf("add_host is playbook-only (needs inventory)")
+}
+func (m AddHostModule) Apply(_ Remote) (string, error) { return "", nil }
+
 // ---------- user module ----------
 // Manages local user accounts (needs privilege: sudo is used internally,
 // like the package modules).

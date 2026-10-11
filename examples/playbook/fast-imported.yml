@@ -1,0 +1,6 @@
+- name: Imported mini play
+  hosts: debian
+  gather_facts: false
+  tasks:
+    - name: Imported task ran
+      debug: {msg: "imported-ok"}
