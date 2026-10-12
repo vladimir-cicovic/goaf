@@ -45,6 +45,9 @@ type Play struct {
 	// Strategy "free" runs each host through all tasks independently
 	// (default "linear": task barrier across hosts).
 	Strategy string `yaml:"strategy"`
+	// Serial / SerialPct cap hosts per batch (play wins over CLI).
+	Serial    int `yaml:"-"`
+	SerialPct int `yaml:"-"`
 }
 
 type PlayTask struct {
@@ -116,6 +119,7 @@ type rawPlay struct {
 	MaxFailPct        *int                     `yaml:"max_fail_percentage"`
 	AnyErrors         *bool                    `yaml:"any_errors_fatal"`
 	Outputs           map[string]string        `yaml:"output"`
+	Serial            interface{}              `yaml:"serial"`
 	VarsFiles         []string                 `yaml:"vars_files"`
 	VarsPrompt        []interface{}            `yaml:"vars_prompt"`
 	Strategy          string                   `yaml:"strategy"`
@@ -226,6 +230,24 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 	if rp.Strategy != "" && rp.Strategy != "linear" && rp.Strategy != "free" {
 		return Play{}, fmt.Errorf("play %q: unknown strategy %q (want linear|free)", rp.Name, rp.Strategy)
 	}
+	serialN, serialPct := 0, 0
+	if rp.Serial != nil {
+		switch v := rp.Serial.(type) {
+		case int:
+			serialN = v
+		case string:
+			var err error
+			serialN, serialPct, err = parseSerialParts(v)
+			if err != nil {
+				return Play{}, fmt.Errorf("play %q: %w", rp.Name, err)
+			}
+		default:
+			return Play{}, fmt.Errorf("play %q: serial must be a number or percent", rp.Name)
+		}
+		if serialN < 0 || serialPct < 0 || serialPct > 100 {
+			return Play{}, fmt.Errorf("play %q: bad serial value", rp.Name)
+		}
+	}
 	if rp.BecomeMethod != "" && rp.BecomeMethod != "sudo" && rp.BecomeMethod != "su" {
 		return Play{}, fmt.Errorf("play %q: unknown become_method %q (want sudo|su)", rp.Name, rp.BecomeMethod)
 	}
@@ -280,6 +302,8 @@ func buildPlay(rp rawPlay, dir, rolesDir string) (Play, error) {
 		VarsPrompt:        prompts,
 		Strategy:          rp.Strategy,
 		Environment:       playEnv,
+		Serial:            serialN,
+		SerialPct:         serialPct,
 		GatherSubsets:     subsets,
 		IgnoreUnreachable: ignoreUnreachable,
 		BecomeUser:        rp.BecomeUser,

@@ -760,27 +760,35 @@ func splitLines(s string) []string {
 	return lines
 }
 
-// parseSerial parses --serial=N (hosts per batch) or --serial=N% (percent).
-// Returns (count, percent); only one is non-zero.
-func parseSerial(s string) (int, int) {
+// parseSerialParts parses N (hosts) or N% (percent). Only one non-zero.
+func parseSerialParts(s string) (int, int, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, 0
+		return 0, 0, nil
 	}
 	if strings.HasSuffix(s, "%") {
 		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(s, "%")))
 		if err != nil || n <= 0 || n > 100 {
-			fmt.Fprintf(os.Stderr, "invalid --serial value %q (want 1-100%%)\n", s)
-			os.Exit(1)
+			return 0, 0, fmt.Errorf("invalid serial value %q (want 1-100%%)", s)
 		}
-		return 0, n
+		return 0, n, nil
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 {
-		fmt.Fprintf(os.Stderr, "invalid --serial value %q (want a non-negative integer)\n", s)
+		return 0, 0, fmt.Errorf("invalid serial value %q (want a non-negative integer)", s)
+	}
+	return n, 0, nil
+}
+
+// parseSerial parses --serial=N (hosts per batch) or --serial=N% (percent).
+// Returns (count, percent); only one is non-zero.
+func parseSerial(s string) (int, int) {
+	n, pct, err := parseSerialParts(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --serial value: %v\n", err)
 		os.Exit(1)
 	}
-	return n, 0
+	return n, pct
 }
 
 // confirmRun asks "run N play(s) on M host(s)? [y/N]" on a terminal.

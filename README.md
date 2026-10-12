@@ -43,6 +43,35 @@ goaf-tui running a playbook:
 
 ## Changelog
 
+### Since ver-0.0.3
+
+Transports: WinRM (HTTP/HTTPS + NTLM) for Windows with setup script,
+`command`/`copy`/`template`/`file`/`service`/`user`/`setup` support,
+chunked uploads, `.ps1` external modules, password via inventory/env/prompt.
+
+Modules: `user`, `lineinfile`, `authorized_key`, `reboot` (boot-id proof),
+`upgrade`, `script`, `fetch`, `debug`, `set_fact`, `winget`, `git`,
+`get_url` (checksums), `unarchive`, `cron`, `sysctl`, `mount`,
+`hostname`, `timezone`, `stat`, `slurp`, `find`, `wait_for`, `pause`,
+`assert`, external script modules (collections manifest, versions,
+`min_goaf`) — plus `--diff` everywhere and `backup=true`.
+
+Playbooks: blocks/rescue/always, pre/post_tasks, `run_once`,
+`delegate_to`, `register`/`failed_when`/`changed_when`/`ignore_errors`,
+`--tags`/`--skip-tags`, `--limit`, `--serial` (+`%`, play-level),
+`max_fail_percentage`/`any_errors_fatal`, `retries`/`delay`/`until`,
+`flush_handlers`, `vars_files`/`vars_prompt`, `strategy: free`,
+`throttle`, `group_by`/`add_host`, `import_playbook`, roles (+deps),
+`no_log`, `environment:`, per-task `check_mode`, `listen`,
+`ignore_unreachable`, `gather_subset`, `become`/`become_user`/`become_method`
+(play/task/CLI), `output:`, `validate`, `plan` save/apply (+drift check),
+dynamic inventory, workspaces, `-e` extra vars, `--confirm`.
+
+Platform: connection pooling, facts cache, host/group vars, vault
+(playbook+inventory), sudo passwords, JSONL→SQLite audit, run history,
+webhooks, state tracking + `drift` (+`--fix`, scoped), TUI history replay
+and run options, unit tests, CI, goreleaser.
+
 ### ver-0.0.3 - fixes, verified on docker (debian / openSUSE / alpine / arch / fedora)
 
 Fixes:
@@ -866,6 +895,14 @@ Tasks tagged `always` run even with `--tags` (unless skipped).
   goaf -i inv.yml --limit=web run site.yml     # only web hosts
   goaf -i inv.yml --serial=2 run site.yml      # two hosts at a time
   goaf -i inv.yml --serial=25% run site.yml    # percent of hosts per batch
+```
+Play-level `serial:` (hosts or percent) wins over the CLI flag:
+
+```yaml
+- name: Rolling deploy
+  hosts: web
+  serial: 1
+  max_fail_percentage: 50
 ```
 
 ## Diff and backup
