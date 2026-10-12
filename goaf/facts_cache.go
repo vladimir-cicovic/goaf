@@ -37,7 +37,8 @@ func loadFactsCache() map[string]cachedFacts {
 	return out
 }
 
-// saveFactsCache persists the cache (best effort).
+// saveFactsCache persists the cache (best effort, locked against
+// parallel runs).
 func saveFactsCache(cache map[string]cachedFacts) {
 	path := factsCachePath()
 	if path == "" {
@@ -48,7 +49,10 @@ func saveFactsCache(cache map[string]cachedFacts) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	_ = withLockedFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644, func(f *os.File) error {
+		_, err := f.Write(data)
+		return err
+	})
 }
 
 // clearFactsCache drops all cached facts.

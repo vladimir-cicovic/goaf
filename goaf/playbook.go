@@ -921,6 +921,53 @@ var vaultAskPass bool
 var workspaceName = "default"
 var workspaceVars = map[string]string{"workspace": "default"}
 
+// extraVars holds -e key=value pairs (repeatable, space-separated, @file
+// supported). Highest precedence: beats play, role, even registered vars.
+var extraVars = map[string]string{}
+
+// parseExtraValue parses one -e value into vars (space-separated pairs or
+// @file with flat/{vars:} YAML, vault values decrypted when possible).
+func parseExtraValue(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, field := range strings.Fields(s) {
+		if strings.HasPrefix(field, "@") {
+			data, err := os.ReadFile(field[1:])
+			if err != nil {
+				return nil, fmt.Errorf("-e file %s: %w", field, err)
+			}
+			if nested, ok := rawVarsKey(data); ok {
+				for k, v := range nested {
+					out[k] = v
+				}
+				continue
+			}
+			flat := map[string]string{}
+			if err := yaml.Unmarshal(data, &flat); err != nil {
+				return nil, fmt.Errorf("-e file %s: %w", field, err)
+			}
+			for k, v := range flat {
+				out[k] = v
+			}
+			continue
+		}
+		idx := strings.Index(field, "=")
+		if idx <= 0 {
+			return nil, fmt.Errorf("bad -e value %q, want key=value or @file", field)
+		}
+		out[field[:idx]] = field[idx+1:]
+	}
+	// Decrypt vault values when a password is available without prompting
+	// (prompting happens later at point of use if needed).
+	for k, v := range out {
+		if strings.HasPrefix(v, vaultHeader) {
+			if dv, err := decryptVaultValue(v, vaultPassFile, false); err == nil {
+				out[k] = dv
+			}
+		}
+	}
+	return out, nil
+}
+
 // workspacesDir is the base directory for workspaces (flag --workspaces-dir).
 var workspacesDir = "workspaces"
 

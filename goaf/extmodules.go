@@ -239,30 +239,56 @@ var externalModuleNames = map[string]bool{}
 type extModuleMeta struct {
 	Version     string `yaml:"version"`
 	Description string `yaml:"description"`
+	MinGoaf     string `yaml:"min_goaf"`
 }
 
 // extModuleMetas holds manifest metadata by module name.
 var extModuleMetas = map[string]extModuleMeta{}
 
+// cmpVersion compares dotted versions ("1.2" == "1.2.0"); -1/0/+1.
+func cmpVersion(a, b string) int {
+	pa := strings.Split(strings.TrimSpace(a), ".")
+	pb := strings.Split(strings.TrimSpace(b), ".")
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var na, nb int
+		if i < len(pa) {
+			fmt.Sscanf(pa[i], "%d", &na)
+		}
+		if i < len(pb) {
+			fmt.Sscanf(pb[i], "%d", &nb)
+		}
+		if na != nb {
+			if na < nb {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
 // loadModulesManifest reads an optional modules.yml beside the scripts:
 //
 //	version: 1
+//	min_goaf: "0.0.7"          # all modules below need at least this goaf
 //	modules:
-//	  motd: {version: "1.2.0", description: "..."}
-func loadModulesManifest(dir string) {
+//	  motd: {version: "1.2.0", description: "...", min_goaf: "0.0.9"}
+func loadModulesManifest(dir string) string {
 	data, err := os.ReadFile(filepath.Join(dir, "modules.yml"))
 	if err != nil {
-		return
+		return ""
 	}
 	var doc struct {
+		MinGoaf string                   `yaml:"min_goaf"`
 		Modules map[string]extModuleMeta `yaml:"modules"`
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return
+		return ""
 	}
 	for name, meta := range doc.Modules {
 		extModuleMetas[name] = meta
 	}
+	return doc.MinGoaf
 }
 
 // RegisterExternalModules scans dir for executable scripts and registers
@@ -276,6 +302,7 @@ func RegisterExternalModules(dir string, explicit bool) error {
 		}
 		return nil
 	}
+	topMin := loadModulesManifest(dir)
 	for _, e := range entries {
 		if e.IsDir() {
 			// One level of subdirectories: collection dirs, modules
@@ -289,7 +316,7 @@ func RegisterExternalModules(dir string, explicit bool) error {
 				if se.IsDir() || strings.HasPrefix(se.Name(), ".") {
 					continue
 				}
-				registerExternalFile(sub, se.Name(), e.Name()+".")
+				registerExternalFile(sub, se.Name(), e.Name()+".", topMin)
 			}
 			continue
 		}
@@ -300,16 +327,16 @@ func RegisterExternalModules(dir string, explicit bool) error {
 		if name == "modules.yml" {
 			continue // manifest, not a module
 		}
-		registerExternalFile(dir, name, "")
+		registerExternalFile(dir, name, "", topMin)
 	}
-	loadModulesManifest(dir)
 	sort.Strings(knownModuleNames)
 	return nil
 }
 
 // registerExternalFile registers one script; prefix namespaces collections
-// (sub/motd.sh becomes sub.motd).
-func registerExternalFile(dir, name, prefix string) {
+// (sub/motd.sh becomes sub.motd). Modules needing a newer goaf than
+// topMin (manifest default, overridable per module) are skipped loudly.
+func registerExternalFile(dir, name, prefix, topMin string) {
 	modName := name
 	if idx := strings.LastIndex(name, "."); idx > 0 {
 		modName = name[:idx]
@@ -317,6 +344,14 @@ func registerExternalFile(dir, name, prefix string) {
 	modName = prefix + modName
 	if _, ok := moduleRegistry[modName]; ok {
 		return // builtin (or earlier) wins over external
+	}
+	need := topMin
+	if meta, ok := extModuleMetas[modName]; ok && meta.MinGoaf != "" {
+		need = meta.MinGoaf
+	}
+	if need != "" && cmpVersion(goafVersion, need) < 0 {
+		fmt.Fprintf(os.Stderr, "modules: %q needs goaf >= %s (have %s), skipped\n", modName, need, goafVersion)
+		return
 	}
 	bin := filepath.Join(dir, name)
 	moduleRegistry[modName] = externalFactory(modName, bin)

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -150,18 +151,47 @@ func recordState(inv *Inventory, h Host, play, module string, params map[string]
 		Output:      output,
 		Fingerprint: fingerprintOf(label, module, params),
 	}
-	entries := loadStateFor(inv)
-	kept := make([]stateEntry, 0, len(entries)+1)
-	for _, e := range entries {
-		if e.Fingerprint != entry.Fingerprint {
-			kept = append(kept, e)
+	recordStateLocked(statePathFor(inv), entry)
+}
+
+// recordStateLocked is recordState with read-modify-write under one lock
+// (used when correctness across parallel runs matters).
+func recordStateLocked(path string, entry stateEntry) {
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	_ = withLockedFile(path, os.O_RDWR|os.O_CREATE, 0o644, func(f *os.File) error {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return err
 		}
-	}
-	kept = append(kept, entry)
-	if len(kept) > maxStateEntries {
-		kept = kept[len(kept)-maxStateEntries:]
-	}
-	saveStateEntriesFor(inv, kept)
+		var entries []stateEntry
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &entries); err != nil {
+				entries = nil // corrupt file: start over
+			}
+		}
+		kept := make([]stateEntry, 0, len(entries)+1)
+		for _, e := range entries {
+			if e.Fingerprint != entry.Fingerprint {
+				kept = append(kept, e)
+			}
+		}
+		kept = append(kept, entry)
+		if len(kept) > maxStateEntries {
+			kept = kept[len(kept)-maxStateEntries:]
+		}
+		out, err := json.MarshalIndent(kept, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			return err
+		}
+		_, err = f.Write(out)
+		return err
+	})
 }
 
 // saveStateEntries persists entries (best effort).
@@ -169,7 +199,8 @@ func saveStateEntries(entries []stateEntry) {
 	saveStateEntriesFor(nil, entries)
 }
 
-// saveStateEntriesFor persists entries to the scoped file.
+// saveStateEntriesFor persists entries to the scoped file (locked:
+// parallel runs share one state file).
 func saveStateEntriesFor(inv *Inventory, entries []stateEntry) {
 	path := statePathFor(inv)
 	if path == "" {
@@ -180,7 +211,10 @@ func saveStateEntriesFor(inv *Inventory, entries []stateEntry) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	_ = withLockedFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644, func(f *os.File) error {
+		_, err := f.Write(data)
+		return err
+	})
 }
 
 // forgetState removes entries matching a host label or fingerprint prefix.

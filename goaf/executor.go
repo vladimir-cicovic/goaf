@@ -18,6 +18,12 @@ var diffMode = false
 // When become is true, commands run with sudo privilege escalation.
 // When checkMode is true, Apply is skipped (dry-run).
 func RunOnHosts(hosts []Host, mod Module, parallelism int, become, checkMode bool) []Result {
+	return RunOnHostsBecome(hosts, mod, parallelism, become, "", "", checkMode)
+}
+
+// RunOnHostsBecome is RunOnHosts with explicit become user/method
+// (CLI --become-user/--become-method).
+func RunOnHostsBecome(hosts []Host, mod Module, parallelism int, become bool, becomeUser, becomeMethod string, checkMode bool) []Result {
 	if parallelism < 1 {
 		parallelism = 1
 	}
@@ -34,7 +40,7 @@ func RunOnHosts(hosts []Host, mod Module, parallelism int, become, checkMode boo
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res := runOne(host, mod, become, checkMode)
+			res := runOneBecome(host, mod, become, becomeUser, becomeMethod, checkMode)
 
 			mu.Lock()
 			results = append(results, res)
@@ -47,12 +53,17 @@ func RunOnHosts(hosts []Host, mod Module, parallelism int, become, checkMode boo
 }
 
 func runOne(host Host, mod Module, become, checkMode bool) Result {
+	return runOneBecome(host, mod, become, "", "", checkMode)
+}
+
+func runOneBecome(host Host, mod Module, become bool, becomeUser, becomeMethod string, checkMode bool) Result {
 	sess, err := dialHost(host)
 	if err != nil {
 		return Result{Host: hostLabel(host), Err: err}
 	}
 	defer sess.Close()
 	sess.SetBecome(become)
+	sess.SetBecomeUser(becomeUser, becomeMethod)
 	return RunModule(sess.DisplayHost(), sess, mod, checkMode)
 }
 
@@ -289,16 +300,33 @@ func runOnSessions(hosts []Host, mkMod func(h Host) (Module, error), sessions ma
 			defer func() { <-sem }()
 
 			label := hostLabel(host)
+			mu.Lock()
 			sess, ok := sessions[label]
+			mu.Unlock()
 			if !ok {
-				err := connErrs[label]
-				if err == nil {
-					err = fmt.Errorf("no connection to host")
+				// Retry the dial: transient network blips recover here,
+				// which also makes task retries useful for dead connections.
+				if fresh, derr := dialPooled(host); derr == nil {
+					mu.Lock()
+					sessions[label] = fresh
+					delete(connErrs, label)
+					mu.Unlock()
+					sess, ok = fresh, true
+				} else {
+					mu.Lock()
+					err := connErrs[label]
+					mu.Unlock()
+					if err == nil {
+						err = derr
+					}
+					if err == nil {
+						err = fmt.Errorf("no connection to host")
+					}
+					mu.Lock()
+					results = append(results, Result{Host: label, Err: err})
+					mu.Unlock()
+					return
 				}
-				mu.Lock()
-				results = append(results, Result{Host: label, Err: err})
-				mu.Unlock()
-				return
 			}
 			mod, err := mkMod(host)
 			if err != nil {
