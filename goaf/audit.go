@@ -43,11 +43,15 @@ const auditSchema = `CREATE TABLE IF NOT EXISTS runs (
   duration_ms INTEGER NOT NULL DEFAULT 0
 );`
 
-// auditDBPath returns ~/.goaf/audit.db ("" when home is unknown).
+// auditDBPath returns the audit database, scoped by workspace:
+// ~/.goaf/audit.db for default, ~/.goaf/audit-<name>.db otherwise.
 func auditDBPath() string {
 	home := homeDir()
 	if home == "" {
 		return ""
+	}
+	if workspaceName != "" && workspaceName != "default" {
+		return filepath.Join(home, ".goaf", "audit-"+workspaceName+".db")
 	}
 	return filepath.Join(home, ".goaf", "audit.db")
 }
