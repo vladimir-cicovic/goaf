@@ -15,6 +15,9 @@ type Config struct {
 	Become        bool   `yaml:"become,omitempty"`
 	Report        bool   `yaml:"report,omitempty"`
 	ReportPath    string `yaml:"report_path,omitempty"`
+	Tags          string `yaml:"tags,omitempty"`
+	Serial        int    `yaml:"serial,omitempty"`
+	BecomeUser    string `yaml:"become_user,omitempty"`
 }
 
 // Default returns a Config with sensible out-of-the-box values.

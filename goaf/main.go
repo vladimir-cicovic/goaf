@@ -262,6 +262,10 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+	if args[0] == "version" {
+		fmt.Printf("goaf %s\n", goafVersion)
+		return
+	}
 
 	// vault helper: goaf vault encrypt|decrypt [value|-] (stdin when omitted)
 	if args[0] == "vault" {
@@ -269,8 +273,21 @@ func main() {
 		return
 	}
 
-	// modules: list registered (builtin + external) modules
+	// modules: list registered modules, or install one from URL/path
 	if args[0] == "modules" {
+		if len(args) > 1 && args[1] == "install" {
+			if len(args) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: goaf modules install <url|path> [--modules-path=dir]")
+				os.Exit(1)
+			}
+			dest, err := installModule(args[2], modulesPathFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("installed %s\n", dest)
+			return
+		}
 		for _, n := range listModuleNames() {
 			if meta, ok := extModuleMetas[n]; ok && (meta.Version != "" || meta.Description != "") {
 				ver := meta.Version

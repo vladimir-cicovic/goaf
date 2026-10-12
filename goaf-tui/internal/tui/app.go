@@ -92,6 +92,9 @@ const (
 	rcReport
 	rcReportPath
 	rcBecome
+	rcTags
+	rcSerial
+	rcBecomeUser
 	rcSettingCount
 )
 
@@ -144,8 +147,12 @@ type Model struct {
 	report     bool
 	reportPath string
 	rcEditing  bool
+	rcEditRow  rcSetting
 	rcInput    textinput.Model
 	become     bool
+	tags       string
+	serial     int
+	becomeUser string
 
 	// Run state
 	running     bool
@@ -208,6 +215,9 @@ func New(invPath string) Model {
 		dryRun:     cfg.DryRun,
 		become:     cfg.Become,
 		report:     cfg.Report,
+		tags:       cfg.Tags,
+		serial:     cfg.Serial,
+		becomeUser: cfg.BecomeUser,
 		invInput:   invTi,
 		tInput:     taskTi,
 		rcInput:    rcTi,
@@ -478,28 +488,54 @@ func (m Model) updateTaskInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// updateRCInput handles keypresses while the report path input is active.
+// updateRCInput handles keypresses while a run-config input is active
+// (report path, tags or become user — tracked by rcEditRow).
 func (m Model) updateRCInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	current := ""
+	switch m.rcEditRow {
+	case rcReportPath:
+		current = m.reportPath
+	case rcTags:
+		current = m.tags
+	case rcBecomeUser:
+		current = m.becomeUser
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
 		m.rcEditing = false
 		m.rcInput.Blur()
-		m.rcInput.SetValue(m.reportPath)
+		m.rcInput.SetValue(current)
 		return m, nil
 	case "enter":
 		val := strings.TrimSpace(m.rcInput.Value())
 		m.rcEditing = false
 		m.rcInput.Blur()
-		if val != "" {
-			m.reportPath = val
+		switch m.rcEditRow {
+		case rcReportPath:
+			if val != "" {
+				m.reportPath = val
+			}
+		case rcTags:
+			m.tags = val
+		case rcBecomeUser:
+			m.becomeUser = val
 		}
 		return m, nil
 	}
 	var cmd tea.Cmd
 	m.rcInput, cmd = m.rcInput.Update(msg)
 	return m, cmd
+}
+
+// editRow starts text editing for a run-config row.
+func (m Model) editRow(row rcSetting, current string) Model {
+	m.rcEditRow = row
+	m.rcInput.SetValue(current)
+	m.rcInput.Focus()
+	m.rcEditing = true
+	return m
 }
 
 // updateSearchInput handles keypresses while the search bar is active.
@@ -784,20 +820,36 @@ func (m Model) handleRunConfigKey(key string) Model {
 			}
 		case rcReportPath:
 			if m.report {
-				m.rcInput.SetValue(m.reportPath)
-				m.rcInput.Focus()
-				m.rcEditing = true
+				m = m.editRow(rcReportPath, m.reportPath)
 			}
 		case rcBecome:
 			m.become = !m.become
+		case rcTags:
+			m = m.editRow(rcTags, m.tags)
+		case rcBecomeUser:
+			m = m.editRow(rcBecomeUser, m.becomeUser)
 		}
 	case "right", "l", "+":
-		if rcSetting(m.rcCursor) == rcParallel && m.parallel < 50 {
-			m.parallel++
+		switch rcSetting(m.rcCursor) {
+		case rcParallel:
+			if m.parallel < 50 {
+				m.parallel++
+			}
+		case rcSerial:
+			if m.serial < 100 {
+				m.serial++
+			}
 		}
 	case "left", "h", "-":
-		if rcSetting(m.rcCursor) == rcParallel && m.parallel > 1 {
-			m.parallel--
+		switch rcSetting(m.rcCursor) {
+		case rcParallel:
+			if m.parallel > 1 {
+				m.parallel--
+			}
+		case rcSerial:
+			if m.serial > 0 {
+				m.serial--
+			}
 		}
 	}
 	return m
@@ -1050,6 +1102,9 @@ func (m Model) saveConfig() {
 		Become:        m.become,
 		Report:        m.report,
 		ReportPath:    m.reportPath,
+		Tags:          m.tags,
+		Serial:        m.serial,
+		BecomeUser:    m.becomeUser,
 	})
 }
 
@@ -1155,6 +1210,15 @@ func (m Model) buildArgs() ([]string, error) {
 	args = append(args, "-p", fmt.Sprintf("%d", m.parallel))
 	if m.report && m.reportPath != "" {
 		args = append(args, "-report", m.reportPath)
+	}
+	if strings.TrimSpace(m.tags) != "" {
+		args = append(args, "--tags="+strings.TrimSpace(m.tags))
+	}
+	if m.serial > 0 {
+		args = append(args, fmt.Sprintf("--serial=%d", m.serial))
+	}
+	if strings.TrimSpace(m.becomeUser) != "" {
+		args = append(args, "--become-user="+strings.TrimSpace(m.becomeUser))
 	}
 
 	switch m.tMode {
@@ -1584,6 +1648,9 @@ func (m Model) contentRunConfig(maxLines int) string {
 		{rcReport, "Report  "},
 		{rcReportPath, "  Path  "},
 		{rcBecome, "Become  "},
+		{rcTags, "Tags    "},
+		{rcSerial, "Serial  "},
+		{rcBecomeUser, "BecUser "},
 	}
 
 	var lines []string
@@ -1599,6 +1666,24 @@ func (m Model) contentRunConfig(maxLines int) string {
 		switch r.setting {
 		case rcParallel:
 			val = styleKey.Render(fmt.Sprintf("%d", m.parallel))
+		case rcSerial:
+			if m.serial <= 0 {
+				val = styleDim.Render("off")
+			} else {
+				val = styleKey.Render(fmt.Sprintf("%d", m.serial))
+			}
+		case rcTags, rcBecomeUser:
+			current := m.tags
+			if r.setting == rcBecomeUser {
+				current = m.becomeUser
+			}
+			if m.rcEditing && m.rcCursor == i {
+				val = m.rcInput.View()
+			} else if current == "" {
+				val = styleDim.Render("-")
+			} else {
+				val = styleDim.Render(truncate(current, 16))
+			}
 		case rcReportPath:
 			if m.rcEditing && m.rcCursor == i {
 				val = m.rcInput.View()

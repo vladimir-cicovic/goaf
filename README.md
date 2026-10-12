@@ -972,7 +972,8 @@ POST the run recap as JSON at the end of ad-hoc, playbook and apply runs
 ## Audit - who ran what
 
 Every ad-hoc, playbook and apply run is stored in SQLite
-`~/.goaf/audit.db` (time, user, mode, hosts, ok/changed/failed).
+`~/.goaf/audit.db` (time, user, mode, hosts, ok/changed/failed) —
+`~/.goaf/audit-<workspace>.db` outside the default workspace.
 A legacy `audit.log` (JSONL) is imported automatically on first use.
 
 ```bash
@@ -1133,6 +1134,55 @@ modules:
   motd: {version: "1.2.0", description: "motd manager"}
   future: {version: "2.0", min_goaf: "99.0.0"}
 ```
+
+## Extra vars - highest precedence CLI variables
+
+`-e` is repeatable, space-separated, with `@file` includes (flat or
+`{vars:}` YAML, vault allowed). Beats play, role, even registered vars.
+
+```bash
+  goaf -i inv.yml -e target_version=2.4.1 run site.yml
+  goaf -i inv.yml -e "a=1 b=2" -e @extra.yml run site.yml
+```
+
+## Become as another user
+
+CLI flags override playbook `become_user`/`become_method` (task wins
+over play without CLI flags).
+
+```bash
+  goaf -i inv.yml -t web -become --become-user=nobody command "whoami"
+  goaf -i inv.yml -t web -become --become-user=nobody --become-method=su command "whoami"
+```
+`su` has no password support (passwordless setups only).
+
+## Collections manifest - versions and requirements
+
+`modules.yml` documents versions; `min_goaf` (global or per module)
+skips modules needing a newer goaf with a warning.
+
+```yaml
+# modules/modules.yml
+version: 1
+min_goaf: "0.0.7"
+modules:
+  motd: {version: "1.2.0", description: "motd manager"}
+  future: {version: "2.0", min_goaf: "99.0.0"}
+```
+
+Install modules from a URL or local path (keeps extension, subdirs
+become `collection.module`):
+
+```bash
+  goaf --modules-path=./modules modules install https://example.com/motd.sh
+  goaf --modules-path=./modules modules install ./motd.sh
+```
+
+## TUI run options - tags, serial, become user
+
+The Run Config panel also offers Tags (comma list), Serial batch size
+(0 = off) and BecomeUser; all persist across restarts and are passed
+as `--tags` / `--serial` / `--become-user`.
 
 ## Output - values printed at play end
 
