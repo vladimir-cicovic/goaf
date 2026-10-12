@@ -102,6 +102,38 @@ func TestLoadHistoryLines(t *testing.T) {
 	}
 }
 
+func TestBuildArgsOptions(t *testing.T) {
+	m := Model{
+		invPath: "/tmp/inv.yml", tMode: taskPlaybook, playbookPath: "site.yml",
+		parallel: 10, tags: "a,b", serial: 2, become: true,
+		becomeUser: "deploy", limit: "web", becomeMethod: "su",
+	}
+	args, err := m.buildArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--tags=a,b", "--serial=2", "--become-user=deploy", "--limit=web", "--become-method=su"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in %q", want, joined)
+		}
+	}
+	m2 := Model{
+		invPath: "/tmp/inv.yml", tMode: taskPlaybook, playbookPath: "site.yml",
+		parallel: 10,
+	}
+	args2, err := m2.buildArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined2 := strings.Join(args2, " ")
+	for _, nope := range []string{"--tags=", "--serial=", "--become-user=", "--limit=", "--become-method="} {
+		if strings.Contains(joined2, nope) {
+			t.Errorf("unexpected %q in %q", nope, joined2)
+		}
+	}
+}
+
 func TestRunMode(t *testing.T) {
 	if got := runMode([]string{"-i", "inv.yml", "run", "site.yml"}); got != "playbook" {
 		t.Errorf("got %q", got)

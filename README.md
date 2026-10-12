@@ -1178,11 +1178,13 @@ become `collection.module`):
   goaf --modules-path=./modules modules install ./motd.sh
 ```
 
-## TUI run options - tags, serial, become user
+## TUI run options - tags, serial, become user, limit, become method
 
 The Run Config panel also offers Tags (comma list), Serial batch size
-(0 = off) and BecomeUser; all persist across restarts and are passed
-as `--tags` / `--serial` / `--become-user`.
+(0 = off), BecomeUser, Limit (host pattern) and BecomeMethod
+(cycles off/sudo/su); all persist across restarts and are passed
+as `--tags` / `--serial` / `--become-user` / `--limit` /
+`--become-method`.
 
 ## Output - values printed at play end
 
