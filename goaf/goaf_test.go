@@ -1006,6 +1006,29 @@ func TestMinGoafGate(t *testing.T) {
 	delete(extModuleMetas, "old")
 }
 
+func TestPlaySerial(t *testing.T) {
+	plays, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  serial: 2\n"), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plays[0].Serial != 2 {
+		t.Errorf("bad serial: %+v", plays[0])
+	}
+	plays, err = loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  serial: 25%\n"), "", "roles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plays[0].SerialPct != 25 {
+		t.Errorf("bad serial pct: %+v", plays[0])
+	}
+	if _, err := loadPlaybookBytes([]byte("- name: p\n  hosts: all\n  serial: nope\n"), "", "roles"); err == nil {
+		t.Error("expected error for bad serial")
+	}
+	if got := effectiveSerial(RunOptions{Serial: 2}, 10); got != 2 {
+		t.Errorf("play serial should be used directly: %d", got)
+	}
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

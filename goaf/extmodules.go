@@ -3,10 +3,15 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -368,6 +373,50 @@ func externalFactory(modName, bin string) ModuleFactory {
 		}
 		return ExternalModule{ModName: modName, Bin: bin, Params: cp}, nil
 	}
+}
+
+// installModule fetches a module script (http/https URL or local path)
+// into dir, keeping its extension. Rejects path traversal.
+func installModule(src, dir string) (string, error) {
+	var data []byte
+	name := ""
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(src)
+		if err != nil {
+			return "", fmt.Errorf("downloading %s: %w", src, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("downloading %s: %s", src, resp.Status)
+		}
+		data, err = io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if err != nil {
+			return "", fmt.Errorf("downloading %s: %w", src, err)
+		}
+		name = path.Base(strings.Split(src, "?")[0])
+	} else {
+		var err error
+		data, err = os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", src, err)
+		}
+		name = filepath.Base(src)
+	}
+	if name == "" || name == "." || strings.Contains(name, "\\") || strings.Contains(name, "/") || strings.HasPrefix(name, ".") {
+		return "", fmt.Errorf("bad module file name %q", name)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(dir, name)
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return "", err
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(dest, 0o755)
+	}
+	return dest, nil
 }
 
 // listModuleNames returns all registered module names, sorted.

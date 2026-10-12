@@ -211,6 +211,18 @@ func (m UserModule) applyWin(s Remote) (string, error) {
 	return "created user: " + m.Username, nil
 }
 
+// Diff shows user add/remove.
+func (m UserModule) Diff(s Remote) (string, error) {
+	state := m.State
+	if state == "" {
+		state = "present"
+	}
+	if state == "absent" {
+		return "-user: " + m.Username, nil
+	}
+	return "+user: " + m.Username, nil
+}
+
 // ---------- lineinfile module ----------
 // Ensures a single line exists in (or is absent from) a remote text file.
 

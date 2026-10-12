@@ -167,7 +167,11 @@ func RunPlaybookOpts(plays []Play, inv *Inventory, opts RunOptions) (int, *RunRe
 
 		abortedRun := false
 		lastFacts := map[string]Facts{}
-		for _, batch := range splitBatches(fresh, effectiveSerial(opts, len(fresh))) {
+		effOpts := opts
+		if play.Serial != 0 || play.SerialPct != 0 {
+			effOpts.Serial, effOpts.SerialPct = play.Serial, play.SerialPct
+		}
+		for _, batch := range splitBatches(fresh, effectiveSerial(effOpts, len(fresh))) {
 			if abortedRun {
 				break
 			}

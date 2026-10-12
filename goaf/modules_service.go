@@ -208,6 +208,65 @@ func serviceStateCmd(init, name, state string) (string, error) {
 	return "", fmt.Errorf("unknown init system: %s", init)
 }
 
+// Diff shows state/startup changes (best effort, no remote snapshot needed:
+// it re-reads current values and compares with desired).
+func (m ServiceModule) Diff(s Remote) (string, error) {
+	if isWinRM(s) {
+		status := winServiceStatus(s, m.SvcName)
+		var b strings.Builder
+		b.WriteString("--- service " + m.SvcName + "\n+++ service " + m.SvcName + " (desired)\n")
+		changed := false
+		if m.State != "" {
+			want := map[string]string{"started": "Running", "stopped": "Stopped", "restarted": "Running"}[m.State]
+			if m.State == "restarted" || (want != "" && status != want) {
+				b.WriteString("-status=" + status + "\n+status=" + want + "\n")
+				changed = true
+			}
+		}
+		if m.Enabled != nil {
+			startup, _ := s.Run("(Get-Service -Name " + psQuote(m.SvcName) + ").StartType")
+			want := map[bool]string{true: "Automatic", false: "Manual"}[*m.Enabled]
+			if startup = strings.TrimSpace(startup); startup != "" && startup != want {
+				b.WriteString("-startup=" + startup + "\n+startup=" + want + "\n")
+				changed = true
+			}
+		}
+		if !changed {
+			return "", nil
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
+	}
+	init := detectInitSystem(s)
+	if init == "" {
+		return "", nil
+	}
+	active, _ := serviceIsActive(s, init, m.SvcName)
+	var b strings.Builder
+	b.WriteString("--- service " + m.SvcName + "\n+++ service " + m.SvcName + " (desired)\n")
+	changed := false
+	if m.State == "restarted" {
+		b.WriteString("~restart service\n")
+		changed = true
+	} else if m.State == "started" && !active {
+		b.WriteString("-active=no\n+active=yes\n")
+		changed = true
+	} else if m.State == "stopped" && active {
+		b.WriteString("-active=yes\n+active=no\n")
+		changed = true
+	}
+	if m.Enabled != nil && init == "systemd" {
+		enabled, _ := serviceIsEnabled(s, m.SvcName)
+		if enabled != *m.Enabled {
+			b.WriteString(fmt.Sprintf("-enabled=%v\n+enabled=%v\n", enabled, *m.Enabled))
+			changed = true
+		}
+	}
+	if !changed {
+		return "", nil
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
 func serviceEnabledCmd(init, name string, enable bool) string {
 	q := shQuote(name)
 	switch init {
