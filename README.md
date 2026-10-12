@@ -45,6 +45,13 @@ goaf-tui running a playbook:
 
 ## Changelog
 
+### ver-0.0.10
+
+TUI Run Config: Limit (host pattern) and BecomeMethod (off/sudo/su
+toggle) rows with persistence and `buildArgs` coverage; README documents
+all five run options (`--tags`/`--serial`/`--become-user`/`--limit`/
+`--become-method`). Binary version bumped to 0.0.10.
+
 ### ver-0.0.9
 
 Transports: WinRM (HTTP/HTTPS + NTLM) for Windows with setup script,

@@ -19,7 +19,7 @@ import (
 
 // splitFlag parses "-name", "--name" and "--name=value" (also single dash).
 // goafVersion is the release version (bumped per tag).
-const goafVersion = "0.0.8"
+const goafVersion = "0.0.10"
 
 func splitFlag(a string) (name, val string, hasVal bool) {
 	t := strings.TrimLeft(a, "-")
