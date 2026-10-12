@@ -677,6 +677,12 @@ func (c *listRunner) executeItem(taskHosts []Host, task PlayTask, item string) [
 		if task.BecomeMethod != "" {
 			bm = task.BecomeMethod
 		}
+		if cliBecomeUser != "" {
+			bu = cliBecomeUser
+		}
+		if cliBecomeMethod != "" {
+			bm = cliBecomeMethod
+		}
 		return runOnSessions(taskHosts, mkMod, sessions, c.connErrs, c.effBecome(task), check, task.Throttle, bu, bm)
 	}
 }
@@ -1027,6 +1033,12 @@ func (c *listRunner) flushHandlers() int {
 		if handler.BecomeMethod != "" {
 			bm = handler.BecomeMethod
 		}
+		if cliBecomeUser != "" {
+			bu = cliBecomeUser
+		}
+		if cliBecomeMethod != "" {
+			bm = cliBecomeMethod
+		}
 		results := runOnSessions(handlerHosts, mkMod, c.sessions, c.connErrs, c.effBecome(handler), c.opts.CheckMode, 0, bu, bm)
 		for _, r := range results {
 			s := c.statFor(r.Host)
@@ -1090,7 +1102,7 @@ func printPlayOutputs(play Play, inv *Inventory, h Host, facts map[string]Facts,
 
 // taskVars merges variable layers for one host and task iteration:
 // inventory (group, then host) < workspace < play vars < facts < loop item
-// < registered.
+// < registered < extra (-e, always wins).
 func taskVars(inv *Inventory, play Play, h Host, item string, facts map[string]Facts, registeredVars map[string]map[string]string) map[string]string {
 	vars := inv.varsForHost(h)
 	for k, v := range workspaceVars {
@@ -1108,6 +1120,9 @@ func taskVars(inv *Inventory, play Play, h Host, item string, facts map[string]F
 		vars["item"] = item
 	}
 	for k, v := range registeredVars[hostLabel(h)] {
+		vars[k] = v
+	}
+	for k, v := range extraVars {
 		vars[k] = v
 	}
 	return vars

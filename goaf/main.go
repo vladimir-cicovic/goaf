@@ -18,6 +18,9 @@ import (
 )
 
 // splitFlag parses "-name", "--name" and "--name=value" (also single dash).
+// goafVersion is the release version (bumped per tag).
+const goafVersion = "0.0.8"
+
 func splitFlag(a string) (name, val string, hasVal bool) {
 	t := strings.TrimLeft(a, "-")
 	if t == "" || a == t {
@@ -97,6 +100,9 @@ func main() {
 				filtered = append(filtered, a)
 			}
 			continue
+		case "version":
+			fmt.Printf("goaf %s\n", goafVersion)
+			os.Exit(0)
 		case "check":
 			checkMode = true
 		case "json":
@@ -107,6 +113,18 @@ func main() {
 			diffFlag = true
 		case "ask-become-pass":
 			askBecomePass = true
+		case "become-user":
+			if hasVal {
+				cliBecomeUser = val
+			}
+		case "become-method":
+			if hasVal {
+				cliBecomeMethod = val
+				if cliBecomeMethod != "sudo" && cliBecomeMethod != "su" {
+					fmt.Fprintf(os.Stderr, "unknown --become-method %q (want sudo|su)\n", cliBecomeMethod)
+					os.Exit(1)
+				}
+			}
 		case "ask-vault-pass":
 			askVaultPass = true
 		case "ask-winrm-pass":
@@ -165,6 +183,27 @@ func main() {
 		case "workspace":
 			if hasVal {
 				workspaceFlag = val
+			}
+		case "e":
+			// Repeatable: -e a=1 [-e "b=2 c=3"] [-e @file.yml].
+			// Takes the next arg unconditionally (values may start with -).
+			var raw string
+			if hasVal {
+				raw = val
+			} else if i+1 < len(rawArgs) {
+				i++
+				raw = rawArgs[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "-e needs a value (key=value or @file)")
+				os.Exit(1)
+			}
+			parsed, err := parseExtraValue(raw)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			for k, v := range parsed {
+				extraVars[k] = v
 			}
 		case "workspaces-dir":
 			if hasVal {
@@ -461,7 +500,7 @@ func main() {
 	activeEmitter.RunStarted("adhoc", len(hosts), *parallel, checkMode)
 	activeEmitter.TaskHeader(args[0])
 
-	results := RunOnHosts(hosts, mod, *parallel, becomeMode, checkMode)
+	results := RunOnHostsBecome(hosts, mod, *parallel, becomeMode, cliBecomeUser, cliBecomeMethod, checkMode)
 
 	failed := 0
 	changed := 0
@@ -1081,7 +1120,7 @@ func runValidate(playPath, invPath string) int {
 		for _, spec := range play.VarsPrompt {
 			dummyVars[spec.Name] = "PROMPTED"
 		}
-		checkVars := mergeVars(mergeVars(workspaceVars, play.Vars), dummyVars)
+		checkVars := mergeVars(mergeVars(mergeVars(workspaceVars, play.Vars), dummyVars), extraVars)
 		playFailed := 0
 		for _, section := range [][]PlayTask{play.PreTasks, play.Tasks, play.PostTasks} {
 			playFailed += validateTaskList(play.Name, section, checkVars, handlers)
@@ -1174,6 +1213,9 @@ func usage() {
 	fmt.Println("  --vault-pass-file=<path>  password for $GOAFVAULT values (or GOAF_VAULT_PASSWORD)")
 	fmt.Println("  --ask-vault-pass          prompt for the vault password")
 	fmt.Println("  --ask-winrm-pass          prompt for the WinRM password (or GOAF_WINRM_PASSWORD)")
+	fmt.Println("  -e <k=v> [@file]         extra vars, highest precedence (repeatable)")
+	fmt.Println("  --become-user=<u>        privilege target user (default root)")
+	fmt.Println("  --become-method=<m>      sudo (default) or su")
 	fmt.Println("  --notify-webhook=<url>  POST run recap JSON at end (Slack-compatible)")
 	fmt.Println("  --notify-on=<m>         always (default) or failure")
 	fmt.Println("  --facts-ttl=<sec>  reuse cached facts this fresh (default 3600, 0 disables)")

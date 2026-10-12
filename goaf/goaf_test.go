@@ -942,6 +942,70 @@ func TestPoolKey(t *testing.T) {
 	}
 }
 
+func TestParseExtraValue(t *testing.T) {
+	m, err := parseExtraValue("a=1 b=two")
+	if err != nil || m["a"] != "1" || m["b"] != "two" {
+		t.Errorf("got %v, %v", m, err)
+	}
+	if _, err := parseExtraValue("bogus"); err == nil {
+		t.Error("expected error for bare word")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "extra.yml")
+	if err := os.WriteFile(f, []byte("x: \"9\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err = parseExtraValue("@" + f + " y=2")
+	if err != nil || m["x"] != "9" || m["y"] != "2" {
+		t.Errorf("file include failed: %v, %v", m, err)
+	}
+}
+
+func TestCmpVersion(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"0.0.8", "0.0.7", 1}, {"1.2", "1.2.0", 0}, {"0.9", "0.0.9", 1},
+		{"0.0.8", "0.0.9", -1}, {"2.0", "10.0", -1},
+	}
+	for _, c := range cases {
+		if got := cmpVersion(c.a, c.b); got != c.want {
+			t.Errorf("cmpVersion(%q,%q)=%d want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestMinGoafGate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "new.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "version: 1\nmodules:\n  new: {version: \"1.0\", min_goaf: \"99.0.0\"}\n  old: {version: \"1.0\"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "modules.yml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterExternalModules(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := LookupModule("new"); ok {
+		t.Error("too-new module should be skipped")
+	}
+	if _, ok := LookupModule("old"); !ok {
+		t.Error("compatible module should register")
+	}
+	// cleanup global registry pollution for other tests
+	delete(moduleRegistry, "new")
+	delete(moduleRegistry, "old")
+	delete(externalModuleNames, "new")
+	delete(externalModuleNames, "old")
+	delete(extModuleMetas, "new")
+	delete(extModuleMetas, "old")
+}
+
 func TestTagsAllow(t *testing.T) {
 	task := PlayTask{Name: "t", Tags: []string{"demo"}}
 	if !tagsAllow(task, RunOptions{}) {

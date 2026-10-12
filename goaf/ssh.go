@@ -188,9 +188,13 @@ func shQuote(s string) string {
 // becomePassword, when non-empty, is used for sudo authentication
 // (--ask-become-pass or GOAF_BECOME_PASSWORD). The password is piped to
 // `sudo -S` on every command, so no timestamp caching across connections
-// is needed; embedded hardcoded `sudo` calls (package modules) run as root
-// and need no further authentication.
+// is needed; embedded hardcoded `sudo` calls (package modules) keep working.
 var becomePassword string
+
+// cliBecomeUser / cliBecomeMethod come from --become-user/--become-method
+// and override playbook become settings (Ansible precedence).
+var cliBecomeUser string
+var cliBecomeMethod string
 
 // Run executes a command and returns combined stdout+stderr.
 // When s.Become is true, the whole command runs privileged via sudo,
