@@ -18,6 +18,8 @@ type Config struct {
 	Tags          string `yaml:"tags,omitempty"`
 	Serial        int    `yaml:"serial,omitempty"`
 	BecomeUser    string `yaml:"become_user,omitempty"`
+	Limit         string `yaml:"limit,omitempty"`
+	BecomeMethod  string `yaml:"become_method,omitempty"`
 }
 
 // Default returns a Config with sensible out-of-the-box values.

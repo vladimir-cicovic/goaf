@@ -21,7 +21,9 @@ Thank you for that !
 ## Summary
 goaf is cli tool that use one binary with paralel execution with inventory (it contains groups with servers/hosts), template (for different group of servers/hosts ex dev, qa or prod), playbook ( set of command chain need it to execute at hosts side)
 
-Goaf-tui is terminal ui for goaf.
+Goaf-tui is terminal ui for goaf. Its Run Config panel offers Parallel,
+Dry-run, Report (+path), Become, Tags, Serial, BecomeUser, Limit and
+BecomeMethod (cycled with Space); all persist across restarts.
 
 ## Screenshots
 

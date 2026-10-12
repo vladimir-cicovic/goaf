@@ -95,6 +95,8 @@ const (
 	rcTags
 	rcSerial
 	rcBecomeUser
+	rcLimit
+	rcBecomeMethod
 	rcSettingCount
 )
 
@@ -141,18 +143,20 @@ type Model struct {
 	pbScroll   int
 
 	// Run Config panel
-	rcCursor   int
-	parallel   int
-	dryRun     bool
-	report     bool
-	reportPath string
-	rcEditing  bool
-	rcEditRow  rcSetting
-	rcInput    textinput.Model
-	become     bool
-	tags       string
-	serial     int
-	becomeUser string
+	rcCursor     int
+	parallel     int
+	dryRun       bool
+	report       bool
+	reportPath   string
+	rcEditing    bool
+	rcEditRow    rcSetting
+	rcInput      textinput.Model
+	become       bool
+	tags         string
+	serial       int
+	becomeUser   string
+	limit        string
+	becomeMethod string
 
 	// Run state
 	running     bool
@@ -208,20 +212,22 @@ func New(invPath string) Model {
 	searchTi.CharLimit = 100
 
 	m := Model{
-		focus:      panelInventory,
-		parallel:   cfg.Parallel,
-		reportPath: cfg.ReportPath,
-		monSplit:   cfg.MonSplit,
-		dryRun:     cfg.DryRun,
-		become:     cfg.Become,
-		report:     cfg.Report,
-		tags:       cfg.Tags,
-		serial:     cfg.Serial,
-		becomeUser: cfg.BecomeUser,
-		invInput:   invTi,
-		tInput:     taskTi,
-		rcInput:    rcTi,
-		searchTi:   searchTi,
+		focus:        panelInventory,
+		parallel:     cfg.Parallel,
+		reportPath:   cfg.ReportPath,
+		monSplit:     cfg.MonSplit,
+		dryRun:       cfg.DryRun,
+		become:       cfg.Become,
+		report:       cfg.Report,
+		tags:         cfg.Tags,
+		serial:       cfg.Serial,
+		becomeUser:   cfg.BecomeUser,
+		limit:        cfg.Limit,
+		becomeMethod: cfg.BecomeMethod,
+		invInput:     invTi,
+		tInput:       taskTi,
+		rcInput:      rcTi,
+		searchTi:     searchTi,
 	}
 	m.goafBin, _ = findGoaf()
 
@@ -499,6 +505,8 @@ func (m Model) updateRCInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		current = m.tags
 	case rcBecomeUser:
 		current = m.becomeUser
+	case rcLimit:
+		current = m.limit
 	}
 	switch msg.String() {
 	case "ctrl+c":
@@ -521,6 +529,8 @@ func (m Model) updateRCInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tags = val
 		case rcBecomeUser:
 			m.becomeUser = val
+		case rcLimit:
+			m.limit = val
 		}
 		return m, nil
 	}
@@ -828,6 +838,17 @@ func (m Model) handleRunConfigKey(key string) Model {
 			m = m.editRow(rcTags, m.tags)
 		case rcBecomeUser:
 			m = m.editRow(rcBecomeUser, m.becomeUser)
+		case rcLimit:
+			m = m.editRow(rcLimit, m.limit)
+		case rcBecomeMethod:
+			switch m.becomeMethod {
+			case "":
+				m.becomeMethod = "sudo"
+			case "sudo":
+				m.becomeMethod = "su"
+			default:
+				m.becomeMethod = ""
+			}
 		}
 	case "right", "l", "+":
 		switch rcSetting(m.rcCursor) {
@@ -1105,6 +1126,8 @@ func (m Model) saveConfig() {
 		Tags:          m.tags,
 		Serial:        m.serial,
 		BecomeUser:    m.becomeUser,
+		Limit:         m.limit,
+		BecomeMethod:  m.becomeMethod,
 	})
 }
 
@@ -1219,6 +1242,12 @@ func (m Model) buildArgs() ([]string, error) {
 	}
 	if strings.TrimSpace(m.becomeUser) != "" {
 		args = append(args, "--become-user="+strings.TrimSpace(m.becomeUser))
+	}
+	if strings.TrimSpace(m.limit) != "" {
+		args = append(args, "--limit="+strings.TrimSpace(m.limit))
+	}
+	if m.becomeMethod == "sudo" || m.becomeMethod == "su" {
+		args = append(args, "--become-method="+m.becomeMethod)
 	}
 
 	switch m.tMode {
@@ -1651,6 +1680,8 @@ func (m Model) contentRunConfig(maxLines int) string {
 		{rcTags, "Tags    "},
 		{rcSerial, "Serial  "},
 		{rcBecomeUser, "BecUser "},
+		{rcLimit, "Limit   "},
+		{rcBecomeMethod, "BecMeth "},
 	}
 
 	var lines []string
@@ -1672,10 +1703,13 @@ func (m Model) contentRunConfig(maxLines int) string {
 			} else {
 				val = styleKey.Render(fmt.Sprintf("%d", m.serial))
 			}
-		case rcTags, rcBecomeUser:
+		case rcTags, rcBecomeUser, rcLimit:
 			current := m.tags
 			if r.setting == rcBecomeUser {
 				current = m.becomeUser
+			}
+			if r.setting == rcLimit {
+				current = m.limit
 			}
 			if m.rcEditing && m.rcCursor == i {
 				val = m.rcInput.View()
@@ -1683,6 +1717,12 @@ func (m Model) contentRunConfig(maxLines int) string {
 				val = styleDim.Render("-")
 			} else {
 				val = styleDim.Render(truncate(current, 16))
+			}
+		case rcBecomeMethod:
+			if m.becomeMethod == "" {
+				val = styleDim.Render("-")
+			} else {
+				val = styleKey.Render(m.becomeMethod)
 			}
 		case rcReportPath:
 			if m.rcEditing && m.rcCursor == i {
